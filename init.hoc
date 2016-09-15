@@ -1,0 +1,19 @@
+// $Id: init.hoc,v 1.22 2010/12/13 18:08:47 samn Exp $
+
+xwindows=1
+show_panel=0
+pwd()
+load_file("xgetargs.hoc")
+load_file("grvec.hoc")
+load_file("syncode.hoc")
+load_file("decnqs.hoc")
+if (! VECST_INSTALLED) install_vecst()
+if (! INSTALLED_stats) install_stats()
+load_file("drline.hoc")
+load_file("stats.hoc")
+load_file("decmat.hoc")
+load_file("filtutils.hoc")
+load_file("pywrap.hoc")
+verbose_INTF6=0
+load_file("col.hoc")
+

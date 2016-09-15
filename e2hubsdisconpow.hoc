@@ -1,0 +1,33 @@
+// $Id: e2hubsdisconpow.hoc,v 1.1 2010/10/11 03:25:34 samn Exp $ 
+
+
+// draw panels showing power spectra for disconnected columns at baseline comparing with 10 E2 hubs
+
+if(!name_declared("nqbatch")) rcsopen("load.hoc",87)
+
+if(g==nil) gg()
+
+declare("nqf","o[2]","sidx",0,"nqfs","o[2]","winsz",201,"stdg",0.5,"lc",new List())
+{lc.append(new String("C%dintraE")) lc.append(new String("C%dintraI"))}
+declare("vsidx",new Vector())
+{nqbatch.select(-1,"ISEED",1234,"DVSEED",534023,"SIMTYP",0,"DISCONCOL",1) vsidx.append(nqbatch.ind.x(0))}
+{nqbatch.select(-1,"ISEED",1234,"DVSEED",534023,"SIMTYP",18,"DISCONCOL",1) vsidx.append(nqbatch.ind.x(0))}
+
+for vtr(&sidx,vsidx,&i) {
+  nqf[i]=nqbatch.get("nqpmtm",sidx).o
+  nqfs[i]=new NQS()
+  nqfs[i].cp(nqf[i])
+}
+
+//* drit(code,filt)
+proc drit () { local i,j,cc
+  if($1>=0 && $1<=1) {
+    for i=0,1 for j=0,numcols-1 {
+      sprint(tstr,lc.o($1).s,j)
+      cc=nqfs[i].fi(tstr)
+      nqfs[i].v[cc].copy(nqf[i].v[cc])
+      myfilt($2,nqfs[i].v[cc])
+      nqfs[i].gr(tstr,"f",0,i+1,1)
+    }
+  }
+}

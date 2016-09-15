@@ -1,0 +1,657 @@
+// $Id: basestdp.hoc,v 1.229 2012/02/01 12:30:33 samn Exp $
+
+//* params/variables
+
+declare("TargRate",8) // target peak location
+declare("syl","o[2]") // list of sywvs
+declare("taul",new List(),"incl",new List(),"maxwl",new List(),"wgl",new List())
+declare("nqrat","o[1]","lnqp",new List(),"mynqp","o[1]")
+declare("ltab","o[1]","contab","o[1]","wtab","o[2]","mtab","o[1]","dvtab","o[1]")
+declare("witer",0,"updinc",2e3,"uprob",0.1)
+declare("EEinc",0.01,"EIinc",0.01,"IEinc",0.01,"IIinc",0.01,"skipI",0)
+declare("vrecw",new Vector(),"nqrec","o[1]")
+declare("MODW",1,"MINW",1,"MODINC",1,"MININC",0.01)
+declare("SPECTY",3,"drawsm",0,"smhz",1,"PRESM",1) // whether to draw smoothed spectra in mkdrawspec
+declare("dosend",1,"fith","o[3]","dosendex",0,"nqwrex","o[1]")
+declare("maxERate",2,"maxIRate",200)
+declare("lasterr",0)
+
+declare("restorewg",0)
+
+CTYP.append(new String("E"))
+CTYP.append(new String("I"))
+
+//* updateplast(col)
+proc updateplast () { local i,j,a localobj col,xo,vwg,vtau,vinc,vmaxw,vidx
+  a=allocvecs(vwg,vtau,vinc,vmaxw,vidx) col=$o1
+  for ltr(xo,col.ce) {
+    xo.getdvi(vidx)
+    vrsz(vidx.size,vwg,vtau,vinc,vmaxw)
+    xo.getplast(vwg,vtau,vinc,vmaxw)
+    for vtr(&i,vidx,&j) if(vmaxw.x(j)) {
+      if(ice(col.ce.o(i))) {
+        vmaxw.x(j) = plastEImaxw
+        vinc.x(j) = plastEIinc
+      } else {
+        vmaxw.x(j) = plastEEmaxw
+        vinc.x(j) = plastEEinc
+      }
+    }
+    xo.setplast(vwg,vtau,vinc,vmaxw)
+  }
+  dealloc(a)
+}
+
+if(restorewg) {
+  nqplast=new NQS("/u/samn/intfnips/data/11may30_basestdp145_TrainW10_TargTrainRate8_LD2e3__plastnq.nqs")
+  setplastnq(nqplast,col)
+  resetplast_INTF6 = 0 // make sure starting params kept
+}
+
+// jrtm_INTF6 = updinc
+
+declare("vcheck",new Vector())
+declare("myncl",new List(),"myspkl",new List(),"myspktyl",new List(),"vice",new Vector(col.allcells))
+
+//* declares
+
+declare("wgnq","o[9]","myv","o[10]")
+declare("nqp","o[9][10]","nqps","o[9][10]","nqchg","o[9]","nqchgs","o[9]")
+declare("Ts","d[10]","Te","d[10]")
+
+//* mkdrawspec(startt,endt,celltype[,norm,sm])  - makes pmtm spectra
+obfunc mkonespec () { local i,ct,k,nrm,sampr,sm,ts,te localobj ls,nqp,nqps
+  ls=new List()
+  {ts=$1*1e3 te=$2*1e3 ct=$3}
+  if(numarg()>3) nrm=$4 else nrm=0
+  if(numarg()>4) sm=$5 else sm=201
+  sampr=1e3/binsz
+  if(ct<0) sampr=1e3/vdt_INTF6
+  for CDX=0,numcols-1 {
+    if(myv==nil) myv=new Vector() else myv.resize(0)
+    if(ct==-1) {
+      {myv.copy(nqLFP[CDX].v,ts/vdt_INTF6,te/vdt_INTF6-1) myv.sub(myv.mean)}
+    } else {
+      {myv.copy(nqCTY[CDX].v[ct],ts/binsz,te/binsz-1) myv.sub(myv.mean)}
+    }
+    nqp=getspecnq(myv,sampr,SPECTY,PRESM)
+    {nqps=new NQS() nqps.cp(nqp) boxfilt(nqps.v[1],sm)}
+    {ls.append(nqp) ls.append(nqps)}
+  }
+  return ls
+}
+
+//* mk4specs(start1,end1,start2,end2,start3,end3,start4,end4,celltype[,norm,sm])  - makes pmtm spectra for 
+// the 4 periods of the sim: baseline, zip on, zip on + learning, zip on + recall
+proc mk4specs () { local i,ct,k,nrm,sampr,sm,smHZ,a localobj vec
+  a=allocvecs(vec)
+  {Ts[0]=$1*1e3 Te[0]=$2*1e3}
+  {Ts[1]=$3*1e3 Te[1]=$4*1e3}
+  {Ts[2]=$5*1e3 Te[2]=$6*1e3}
+  {Ts[3]=$7*1e3 Te[3]=$8*1e3}
+  ct=$9
+  if(numarg()>9) nrm=$10 else nrm=0
+  if(numarg()>10) smHZ=$11 else smHZ=smhz
+  sampr=1e3/binsz
+  if(ct<0) sampr=200
+  for i=0,3 if(Te[i] > Ts[i]) {
+    if(myv[i]==nil) myv[i]=new Vector() else myv[i].resize(0)
+    if(ct==-1) {
+      {myv[i].copy(nqLFP.v,Ts[i]/vdt_INTF6,Te[i]/vdt_INTF6-1)}
+      vec.resize(myv[i].size/(1e3/vdt_INTF6/sampr))
+      myv[i].downsampavg(vec,(1e3/vdt_INTF6/sampr)) // downsample to 200 Hz
+      myv[i].resize(0)
+      myv[i].copy(vec)
+      myv[i].sub(myv[i].mean)
+    } else {
+      {myv[i].copy(nqCTY[CDX].v[ct],Ts[i]/binsz,Te[i]/binsz-1) myv[i].sub(myv[i].mean)}
+    }
+    {nqsdel(nqp[CDX][i]) nqp[CDX][i]=getspecnq(myv[i],sampr,SPECTY,PRESM)}
+    sm=0
+    while(nqp[CDX][i].v.x(sm) < smHZ) sm += 1
+    //print nqp[CDX][i].v.x(sm),smHZ,sm
+    {nqsdel(nqps[CDX][i]) nqps[CDX][i]=new NQS()}
+    {nqps[CDX][i].cp(nqp[CDX][i]) boxfilt(nqps[CDX][i].v[1],sm)}
+    if(g!=nil) {
+      if(nrm) nqps[CDX][i].v[1].div(nqps[CDX][i].v[1].sum)
+      if(ct>=0) {
+        print CTYP.o(ct).s,i,nqps[CDX][i].v.x(nqps[CDX][i].v[1].max_ind),nqps[CDX][i].v[1].max
+      } else print "LFP",i,nqps[CDX][i].v.x(nqps[CDX][i].v[1].max_ind),nqps[CDX][i].v[1].max
+    }
+  }
+  dealloc(a)
+}
+
+//* dr4spec(celltype) 
+proc dr4spec () {
+  initg()
+  mk4specs(1,PreDur,\
+           PreDur+1,PreDur+ZipDur-1,\
+           PreDur+ZipDur+1,PreDur+ZipDur+LearnDur-1,\
+           PreDur+ZipDur+LearnDur+1,PreDur+ZipDur+LearnDur+PostDur-1,$1)
+  for i=0,3 if(g!=nil) {
+    if(drawsm) {
+      if(nqps[CDX][i]==nil) continue
+      nqps[CDX][i].gr("pow","f",0,i+1,1)
+    } else {
+      if(nqp[CDX][i]==nil) continue
+      nqp[CDX][i].gr("pow","f",0,i+1,1)
+    }
+  }
+  fing()
+}
+
+//* dr4chg(celltype)
+proc dr4chg () { local i,p1,p2
+  initg()
+  if(numarg()<=1) {
+    mk4specs(1,PreDur,\
+             PreDur+1,PreDur+ZipDur-1,\
+             PreDur+ZipDur+1,PreDur+ZipDur+LearnDur-1,\
+             PreDur+ZipDur+LearnDur+1,PreDur+ZipDur+LearnDur+PostDur-1,$1)
+  }
+  {nqsdel(nqchg[CDX]) nqchg[CDX]=new NQS("f","pow")  }
+  nqp[CDX][0].verbose=nqp[CDX][2].verbose=0
+  for i=0,int(nqp[CDX][0].v.max)-1 {
+    if(!nqp[CDX][0].select("f","[]",i,i+1)) continue
+    if(!nqp[CDX][2].select("f","[]",i,i+1)) continue
+    p2 = nqp[CDX][2].getcol("pow").sum
+    p1 = nqp[CDX][0].getcol("pow").sum
+    if(p1>0) nqchg[CDX].append((i+1)/2.0,(p2-p1)/p1) else  nqchg[CDX].append((i+1)/2.0,0)
+  }
+  if(g!=nil) nqchg[CDX].gr("pow","f",0,1,1)
+  fing()
+  nqp[CDX][0].verbose=nqp[CDX][2].verbose=1
+}
+//* getratety(start,end,ty)
+func getratety () { local startt,endt,ty,ns,r
+  startt=$1 endt=$2 ty=$3
+  if(endt-startt<=0) return 0
+  if(snq[CDX]==nil) snq[CDX]=SpikeNQS(vit[CDX].tvec,vit[CDX].vec,col[CDX])
+  ns=snq[CDX].select("type",ty,"t","[]",startt,endt)
+  r = 1e3 * ns / (col[CDX].numc[ty] * (endt-startt) )
+  return r
+}
+//* pravgrates2 (start1,end1,start2,end2,start3,end3,start4,end4) 
+proc pravgrates2 () { local i,ct,r localobj s
+  {Ts[0]=$1*1e3 Te[0]=$2*1e3}
+  {Ts[1]=$3*1e3 Te[1]=$4*1e3}
+  {Ts[2]=$5*1e3 Te[2]=$6*1e3}
+  {Ts[3]=$7*1e3 Te[3]=$8*1e3}
+  s=new String2()
+  for col.ctt(&ct) {
+    sprint(s.s,"%s:\t",CTYP.o(ct).s)
+    for i=0,3 {
+      r = getratety(Ts[i],Te[i],ct)
+      sprint(s.t,"%0.2f\t",r)
+      strcat(s.s,s.t)
+    }
+    print s.s
+  }
+}
+
+//* savenqspec - saves nqp,nqps spectra, uses strv
+proc savenqspec () { local i,st,et,ct localobj str
+  str=new String() 
+  st=plaststartT_INTF6/1e3
+  et=plastendT_INTF6/1e3
+  for case(&ct,E2,I2,E4,I4,CTYPi,CTYPi+1) {
+    if(g!=nil) {
+      g.erase
+      gvmarkflag=0 
+    }
+    mkdrawspec(0,TrainStart/1e3,TrainStart/1e3,LearnDur+TrainStart/1e3,LearnDur+TrainStart/1e3,tstop/1e3,ct)
+    for i=0,2 {    
+      {sprint(str.s,"./data/%s_%s_nqp_%d.nqs",strv,CTYP.o(ct).s,i) nqp[0][i].sv(str.s)}
+      {sprint(str.s,"./data/%s_%s_nqps_%d.nqs",strv,CTYP.o(ct).s,i) nqps[0][i].sv(str.s)}
+    }
+  }
+}
+//* ldnqspec - saves nqp,nqps spectra, uses strv
+obfunc ldnqspec () { local i,st,et,ct localobj str,nqo,nq,nqs
+  {str=new String() nqo=new NQS("str","nq")  nqo.odec("nq") nqo.strdec("str")}
+  for case(&ct,E2,I2,E4,I4,CTYPi,CTYPi+1) {
+    for i=0,3 {    
+      {sprint(str.s,"./data/%s_%s_nqp_%d.nqs",strv,CTYP.o(ct).s,i) nq=new NQS(str.s)}
+      nqo.append(str.s,nq)
+      nqsdel(nq)
+      {sprint(str.s,"./data/%s_%s_nqps_%d.nqs",strv,CTYP.o(ct).s,i) nqs=new NQS(str.s)}
+      nqo.append(str.s,nqs)
+      nqsdel(nqs)      
+    }
+  }
+  return nqo
+}
+//* Vec2Txt - save Vector to text file
+func Vec2Txt () { local i localobj fp
+  fp=new File()
+  fp.wopen($s2)
+  if(!fp.isopen) return 0
+  for i=0,$o1.size-1 fp.printf("%g\n",$o1.x(i))
+  fp.close()
+  return 1
+}
+
+//* run and init nqs objects
+proc myrun () { local i localobj xo
+  run()
+  {nqsdel(snq[CDX]) snq[CDX]=SpikeNQS(vit[CDX].tvec,vit[CDX].vec,col[CDX])}
+  for CDX=0,numcols-1 {snq[CDX].marksym="O"}
+  CDX=0
+  {nqsdel(nqplast) nqplast=getplastnq(col)}
+  {nqsdel(mynqp) mynqp=lnq2nqs(lnqp)}
+  pravgrates2(1,PreDur,\
+              PreDur+1,PreDur+ZipDur-1,\
+              PreDur+ZipDur+1,PreDur+ZipDur+LearnDur-1,\
+              PreDur+ZipDur+LearnDur+1,PreDur+ZipDur+LearnDur+PostDur-1)
+  initAllMyNQs()
+}
+
+//* mysv - save output after myrun
+proc mysv () { local cdx localobj s
+  s=new String()
+  {sprint(s.s,"/u/samn/intfzip/data/%s_snq.nqs",$s1) snq.tog("DB") snq.sv(s.s)}
+  if(nqrat!=nil) {
+    {sprint(s.s,"/u/samn/intfzip/data/%s_nqrat.nqs",$s1) nqrat.tog("DB") nqrat.sv(s.s)}
+  }
+  if(mynqp.size>0) {
+    {sprint(s.s,"/u/samn/intfzip/data/%s_mynqp.nqs",$s1) mynqp.tog("DB") mynqp.sv(s.s)}
+  }
+  // save NQS with LFPs
+  {cdx=0 sprint(s.s,"/u/samn/intfzip/data/%s_%s_LFP.nqs",$s1,col[cdx].name)}
+  {nqLFP[cdx].tog("DB") nqLFP[cdx].sv(s.s)}
+  {nqsdel(wgnq) wgnq=mkwgnq(col) sprint(s.s,"/u/samn/intfzip/data/%s_wgnq.nqs",strv) wgnq.sv(s.s)}
+}
+//* myrunsv(simstr) - run & save output
+proc myrunsv () { 
+  myrun()
+  mysv($s1)
+}
+//* snq2vit(snq,vit) -  copy snq into a vitem
+proc snq2vit () { local i localobj snq,vit  
+  snq=$o1 vit=$o2 snq.tog("DB")
+  vrsz(0,vit.vec,vit.tvec)
+  vit.tvec.copy(snq.getcol("t"))
+  vit.vec.copy(snq.getcol("id"))
+}
+//* myrd(simstr[,rdr]) - read output from data saved with mysv
+proc myrd () { local rdr,cdx localobj s
+  s=new String() if(numarg()>1) rdr=$2 else rdr=0
+  {nqsdel(snq) sprint(s.s,"/u/samn/intfzip/data/%s_snq.nqs",$s1) snq=new NQS(s.s) snq2vit(snq,vit)}
+  if(rdr){
+    {nqsdel(nqrat) sprint(s.s,"/u/samn/intfzip/data/%s_nqrat.nqs",$s1) nqrat=new NQS(s.s)}
+    {nqsdel(mynqp) sprint(s.s,"/u/samn/intfzip/data/%s_mynqp.nqs",$s1) mynqp=new NQS(s.s)}
+  }
+  cdx=0
+  sprint(s.s,"/u/samn/intfzip/data/%s_%s_LFP.nqs",$s1,col[cdx].name)
+  {nqsdel(nqLFP[cdx]) nqLFP[cdx]=new NQS(s.s)}
+  {nqsdel(wgnq) sprint(s.s,"/u/samn/intfzip/data/%s_wgnq.nqs",$s1) wgnq=new NQS(s.s)}
+}
+
+//* settunerc - setup recording of spikes used in tuning
+proc settunerec () { local i localobj xo,nc
+  for i=0,CTYPi-1 myspktyl.append(new Vector())
+  for ltr(xo,col.ce,&i) {
+    xo.flag("out",1) // make sure NetCon events enabled from this cell
+    myncl.append(nc=new NetCon(xo,nil))
+    myspkl.append(new Vector())
+    nc.record(myspkl.o(i)) // record each cell separately
+    vice.x(i)=ice(xo.type)
+  }
+}
+
+//* mksyl - setup lists of weight vectors
+proc mksyl () { local i,dvt localobj vw1,vw2
+  for i=0,1 syl[i]=new List()
+  for i=0,col.allcells-1 {
+    dvt=col.ce.o(i).getdvi()
+    vw1=new Vector(dvt)
+    vw2=new Vector(dvt)
+    col.ce.o(i).getsywv(vw1,vw2)
+    syl[0].append(vw1)
+    syl[1].append(vw2)
+  }
+}
+//* mkstdpl - 
+proc mkstdpl () { local i,dv localobj vtau,vinc,vmaxw,vwg,xo
+  for ltr(xo,col.ce,&i) {
+    dv=xo.getdvi
+    vtau=new Vector(dv)
+    vinc=new Vector(dv)
+    vmaxw=new Vector(dv)
+    vwg=new Vector(dv)
+    if(!ice(xo.type)) { // only STDP from E->X cells
+      xo.getplast(vwg,vtau,vinc,vmaxw)
+      vcheck.append(i)
+    }
+    taul.append(vtau)
+    incl.append(vinc)
+    maxwl.append(vmaxw)
+    wgl.append(vwg)
+  }
+}
+//* mkdvtab - make table with dvi
+proc mkdvtab () { local i localobj col,xo
+  col=$o1
+  dvtab=new List()
+  for ltr(xo,col.ce,&i) {
+    dvtab.append(new Vector(xo.getdvi))
+    xo.getdvi(dvtab.o(dvtab.count-1))
+  }  
+}
+
+//* conn2tab - make lookup tables with connectivity info
+obfunc conn2tab () { local i,j,k,id1,id2 localobj ltab,col,nqc,contab,wtab1,wtab2,mtab,vc
+  col=$o1 ltab=new List() vc=new Vector(col.allcells)
+  for i=0,3 ltab.append(new Matrix(col.allcells,col.allcells))
+  {contab=ltab.o(0) wtab1=ltab.o(1) wtab2=ltab.o(2) mtab=ltab.o(3)}
+  if(col.connsnq==nil) {
+    print "conn2tab ERR: col.connsnq is nil"
+    return nil
+  }
+  nqc=col.connsnq
+  nqc.sort("del") // make sure order in NQS corresponds to getdvi order
+  for i=0,nqc.v.size-1 {
+    id1=nqc.v[0].x(i) // from id1
+    id2=nqc.v[1].x(i) // to id2
+    contab.x(id1,id2)=1 // is there a connection?
+    wtab1.x(id1,id2)=nqc.v[4].x(i) // weight 1
+    wtab2.x(id1,id2)=nqc.v[5].x(i) // weight 2
+    mtab.x(id1,id2) = vc.x(id1) // index into div vector -- assumes order in connsnq according to div
+    vc.x(id1) += 1
+  } 
+  return ltab
+}
+
+//* wrex2nq(col) - return an NQS with external input info
+obfunc wrex2nq () { local i,sy,r,w,row,a localobj enq,col,nsl,ncl,nc,vsy,vm
+  a=allocvecs(vsy,vm) vsy.append(GA,GA2,AM2,NM2) vm.append(0,0,1,0,3,4,2)
+  col=$o1 ncl=col.cstim.ncl nsl=col.cstim.nsl
+  enq = new NQS("id","wGA","wGA2","wAM2","wNM2","rGA","rGA2","rAM2","rNM2","bal")
+  enq.v.indgen(0,col.allcells-1,1)
+  enq.pad()
+  for i=1,enq.m-1 enq.v[i].fill(0)
+  for ltr(nc,ncl,&i) {
+    row = nc.syn.id
+    for vtr(&sy,vsy) if(nc.weight(sy)) {
+      w = enq.v[vm.x(sy)].x(row) = nc.weight(sy)
+      r = enq.v[vm.x(sy)+4].x(row) = 1e3/nsl.o(i).interval
+      if(sy==AM2 || sy==NM2) {
+        enq.v[9].x(row) += r*w
+      } else {
+        enq.v[9].x(row) -= r*w
+      }
+      break
+    }
+  }
+  dealloc(a)
+  return enq
+}
+
+//* nq2wrex(enq,col) - sets external weight/rate params based on NQS
+proc nq2wrex () { local i,sy,row,a localobj enq,col,nsl,ncl,nc,vsy,vm
+  a=allocvecs(vsy,vm) vsy.append(GA,GA2,AM2,NM2) vm.append(0,0,1,0,3,4,2)
+  enq = $o1 col=$o2 ncl=col.cstim.ncl nsl=col.cstim.nsl
+  for ltr(nc,ncl,&i) {
+    row = nc.syn.id
+    for vtr(&sy,vsy) if(nc.weight(sy)) {
+      nc.weight(sy) = enq.v[vm.x(sy)].x(row) 
+      nsl.o(i).interval = 1e3 / enq.v[vm.x(sy)+4].x(row) 
+      break
+    }
+  }
+  dealloc(a)
+}
+
+//* reinforcement learning update
+proc RLUpdate () { local i,j,k,md,df,fctr,inc,inc0,idx,trg,ety,cidx,pkx,pky,pkd,a,poid,pkdr,err,epiE,epiI\
+                    localobj xo,vs,ce,nqp,vec,tvec,vh,vwg,vtau,vinc,vmaxw,vrate,vE,vI
+  print "t:", t, ", witer:",witer
+  a=allocvecs(vec,tvec,vh,vwg,vtau,vinc,vmaxw,vrate,vE,vI)
+  ce=col.ce
+  for i=0,CTYPi-1 if(col.numc[i]) myspktyl.o(i).resize(0) //setup per-type counts
+  vrate.resize(ce.count)
+  err = epiE = epiI = avgE = avgI = 0
+  for ltr(xo,ce,&i) {
+    myspktyl.o(xo.type).append(myspkl.o(i))
+    vrate.x(i)=1e3*myspkl.o(i).size/updinc
+    if(ice(xo.type)) vI.append(vrate.x(i)) else vE.append(vrate.x(i))
+  }
+  if(vE.mean() > maxERate) epiE=1
+  if(vI.mean() > maxIRate) epiI=1
+  vrsz(0,vec,tvec)
+  for case(&i,E2,E4,E5R,E5B,E6,&j) tvec.append(myspktyl.o(i))
+  vh = tvec.histogram(witer*updinc,(witer+1)*updinc,binsz)
+  vh.sub(vh.mean)  
+  lnqp.append(nqp=getspecnq(vh,1e3/binsz,SPECTY,PRESM)) // get spectrum from E MUA
+  pkx = nqp.v.x(nqp.v[1].max_ind)
+  pky = nqp.v[1].max
+  pkd = TargRate - pkx // difference in peak frequency, + = too slow, - = too fast
+  pkdr = abs(pkd) / TargRate
+
+  for i=0,nqp.v.size-1 {
+    if(abs(nqp.v.x(i)-TargRate) < 3) {
+      err -= nqp.v[1].x(i)
+    } else err += nqp.v[1].x(i)
+  }
+
+  // err += pkd^2
+
+  if(err <= lasterr && !epiE && !epiI) {
+    col.ce.o(0).dopelearn(1)  // LTP
+    if(batch_flag==0) print pkx, pky, lasterr, err, " LTP"
+  } else { 
+    col.ce.o(0).dopelearn(-1) // LTD
+    if(batch_flag==0) print pkx, pky, lasterr, err, " LTD"
+  } 
+
+  lasterr = err
+
+  witer += 1
+  for i=0,myspkl.count-1 myspkl.o(i).resize(0) // reset spike counts for cells to 0
+  for(i=CTYPi-1;i>=0;i-=1) if(col.numc[i]) {
+    j=1e3*myspktyl.o(i).size/(col.numc[i]*updinc)
+    if(batch_flag==0) print CTYP.o(i).s, " " , j , " avg Hz "
+    nqrat.append(t,witer,i,j,pkx,pky,err)
+    myspktyl.o(i).resize(0) // reset spike counts for types to 0
+  }
+  dealloc(a)
+  cvode.event(t+updinc,"RLUpdate()") // set next update weights event
+}
+
+//* updateSTDP - update the STDP params
+proc updateSTDP () { local i,j,k,md,df,fctr,inc,inc0,idx,trg,ety,cidx,pkx,pky,pkd,a,poid,pkdr,err\
+                    localobj xo,vs,ce,nqp,vec,tvec,vh,vwg,vtau,vinc,vmaxw,vrate
+  print "t:", t, ", witer:",witer
+  a=allocvecs(vec,tvec,vh,vwg,vtau,vinc,vmaxw,vrate)
+  ce=col.ce
+  for i=0,CTYPi-1 if(col.numc[i]) myspktyl.o(i).resize(0) //setup per-type counts
+  vrate.resize(ce.count)
+  for ltr(xo,ce,&i) {
+    myspktyl.o(xo.type).append(myspkl.o(i))
+    vrate.x(i)=1e3*myspkl.o(i).size/updinc
+  }
+  vrsz(0,vec,tvec)
+  for case(&i,E2,E4,E5R,E5B,E6,&j) tvec.append(myspktyl.o(i))
+  vh = tvec.histogram(witer*updinc,(witer+1)*updinc,binsz)
+  vh.sub(vh.mean)  
+  lnqp.append(nqp=getspecnq(vh,1e3/binsz,SPECTY,PRESM)) // get spectrum from E MUA
+  pkx = nqp.v.x(nqp.v[1].max_ind)
+  pky = nqp.v[1].max
+  pkd = TargRate - pkx // difference in peak frequency, + = too slow, - = too fast
+  pkdr = abs(pkd) / TargRate
+  err = pkd^2
+  if(batch_flag==0) print pkx, pky, pkd, pkdr
+  if(MODINC || MODW) {
+    if(t >= plaststartT_INTF6 && t <= plastendT_INTF6) for vtr(&i,vcheck) if(myspkl.o(i).size) { xo = ce.o(i)    
+      vrsz(xo.getdvi,vwg,vtau,vinc,vmaxw)
+      xo.getplast(vwg,vtau,vinc,vmaxw) // get current weight gains    
+      for vtr(&j,dvtab.o(i),&k) {
+        inc = 0
+        if(vice.x(i)) { // presynaptic I cell
+          if(ISTDP_INTF6) {
+            if(vice.x(j)) { // postsynaptic I cell
+              if(skipI) continue
+              if(pkd > 0) inc = IIinc else if(pkd < 0) inc = -IIinc
+            } else { // postsynaptic E cell
+              if(pkd > 0) inc = IEinc else if(pkd < 0) inc = -IEinc
+            }
+          }
+        } else { // presynaptic E cell
+          if(ESTDP_INTF6) {
+            if(vice.x(j)) { // postsynaptic I cell
+              if(skipI) continue
+              if(pkd > 0 && vrate.x(j)<maxIRate) inc = EIinc else if(pkd < 0) inc = -EIinc
+            } else { // postsynaptic E cell
+              if(pkd > 0) inc = -EEinc else if(pkd < 0 && vrate.x(j)<maxERate) inc = EEinc
+            }
+          }
+        }
+        if(MODINC) vinc.x(k) = MAXxy(MININC,vinc.x(k) + inc*pkdr)
+        if(MODW) vmaxw.x(k) = MAXxy(MINW,vmaxw.x(k) + inc*pkdr)
+      }
+      xo.setplast(vwg,vtau,vinc,vmaxw) // reset plasticity params    
+    }
+  }
+  for vtr(&i,vrecw) {
+    for j=0,col.allcells-1 if(contab.x(i,j)) {
+//      idx = mtab.x(i,j)
+//      nqrec.append(i,j,ce.o(i).type,ce.o(j).type,syl[0].o(i).x(idx),syl[1].o(i).x(idx),witer)
+    }
+  }
+  witer += 1
+  for i=0,myspkl.count-1 myspkl.o(i).resize(0) // reset spike counts for cells to 0
+  for(i=CTYPi-1;i>=0;i-=1) if(col.numc[i]) {
+    j=1e3*myspktyl.o(i).size/(col.numc[i]*updinc)
+    if(batch_flag==0) print CTYP.o(i).s, " " , j , " avg Hz "
+    nqrat.append(t,witer,i,j,pkx,pky,err)
+    myspktyl.o(i).resize(0) // reset spike counts for types to 0
+  }
+  dealloc(a)
+  cvode.event(t+updinc,"updateSTDP()") // set next update weights event
+}
+
+//* mysend - starts off the update q
+proc mysend () { local sz localobj xo
+  for ltr(xo,lnqp) nqsdel(xo)
+  lnqp.remove_all()
+  sz = (LearnDur/(updinc/1e3))
+  {nqsdel(nqrat) nqrat=new NQS("t","witer","ty","rate","pkx","pky","err") nqrat.clear(sz)}
+  {nqsdel(nqrec) nqrec=new NQS("id1","id2","ty1","ty2","witer","wgain","inc","maxw")}
+  lasterr=0
+  if(DopeRL) {
+    cvode.event(updinc,"RLUpdate()")
+  } else cvode.event(updinc,"updateSTDP()") 
+}
+
+//* updateEX
+proc updateEX () { local i
+  print "updateEX at t = ", t
+  for i=1,4 nqwrex.v[i].mul(0.99)
+  nq2wrex(nqwrex,col)
+  cvode.event(t+updinc,"updateEX()") // set next update weights event
+}
+
+//* mysendex - starts off the update EX q
+proc mysendex () { local sz localobj xo
+  nqsdel(nqwrex)
+  nqwrex = wrex2nq(col)
+  cvode.event((PreDur+ZipDur)*1e3,"updateEX()") 
+}
+
+//* prnqrat(nqrat) - print average peak rates in 20 iters
+proc prnqrat () { local sdx localobj nqrat
+  nqrat=$o1
+  sdx=0
+  nqrat.verbose=0
+  while(sdx<witer) {
+    nqrat.select("witer","[]",sdx,sdx+20,"ty",E5R)
+    print nqrat.getcol("pkx").mean,"+/-",nqrat.getcol("pkx").stderr
+    sdx += 20
+  }
+  nqrat.verbose=1
+}
+//* drtargrate(nqrat) -
+proc drtargrate () { localobj nqrat
+  nqrat=$o1
+  nqrat.tog("DB")
+  nqrat.select("ty",E5R)
+  {gvmarkflag=0 nqrat.gr("pkx","t",0,2,1)}
+  {gvmarkflag=1 nqrat.gr("pkx","t",0,2,3) gvmarkflag=0}
+  drline(0,TargRate,tstop,TargRate,g,3,4)
+  drline(TrainStart,0,TrainStart,100,g,9,9)
+  drline(TrainStop,0,TrainStop,100,g,9,9)
+}
+//* drpoprates(nqrat) - draw population rates vs iteration
+proc drpoprates () { local ct,i localobj nqrat
+  nqrat=$o1
+  nqrat.verbose=0
+  drline(0,TargRate,tstop,TargRate,g,3,4)
+  for case(&ct,E2,E4,E5R,E5B,E6,I2,I2L,I4,I4L,&i) {
+    nqrat.select("ty",ct)
+    nqrat.gr("rate","t",0,i+1,1)
+  }
+  nqrat.verbose=1
+  drline(TrainStart,0,TrainStart,100,g,9,9)
+  drline(TrainStop,0,TrainStop,100,g,9,9)
+}
+//* drlnqp(startidx,endidx)
+proc drlnqp () { local sidx,eidx,i
+  sidx=$1 eidx=$2
+  for i=sidx,eidx {
+    lnqp.o(i).gr("pow","f",0,(i+1)%10,1)
+  }
+}
+//* mynqp2lnqp(mynqp) - copy the nqp NQS objects in $o1 to a list and return it
+obfunc mynqp2lnqp () { local i localobj lnqp,mynqp,nqp
+  mynqp=$o1
+  mynqp.tog("DB")
+  lnqp=new List()
+  for i=0,mynqp.v.size-1 lnqp.append(nqp=mynqp.get("nqp",i).o)
+  return lnqp
+}
+//* lnq2nqs(ls) - copy the ls NQS objects to a NQS and return it
+obfunc lnq2nqs () { local i localobj lnq,nq,xo
+  lnq=$o1
+  {nq=new NQS("i","nqp") nq.odec("nqp") nq.clear(lnq.count)}
+  for ltr(xo,lnq,&i) nq.append(i,xo)
+  return nq
+}
+//* mkavgnqp(lnqp,startidx,endidx) - return an nqs with average +/ stderr of power at frequencies
+// lnqp is a list of nqp objects
+obfunc mkavgnqp () { local i,sidx,eidx localobj nqa,nqp,lnqp,va,ve
+  lnqp=$o1 sidx=$2 eidx=$3
+  nqa=new NQS("f","avg","err")
+  for i=sidx,eidx {
+    nqp=lnqp.o(i)
+    
+  }
+  return nqa
+}
+//* svimg1(basename) - saves idraw, for when screen capture not working
+proc svimg1 () {
+  {sprint(tstr,"gif/%s.id",$s1) save_idraw(tstr)}
+}
+//* svimg2(basename) - saves id as gif & gets rid of intermediate pdf
+proc svimg2 () {
+  {sprint(tstr,"epstopdf gif/%s.id",$s1) system(tstr)}
+  {sprint(tstr,"convert  gif/%s.pdf gif/%s.gif",$s1,$s1) system(tstr)}
+  {sprint("rm gif/%s.pdf",$s1) system(tstr)}
+  {sprint("rm gif/%s.id",$s1) system(tstr)}
+}
+
+//* calls
+
+if(dosend) fith=new FInitializeHandler("mysend()")
+if(dosendex) fith[1]=new FInitializeHandler("mysendex()")
+
+settunerec()
+mkstdpl()
+mkdvtab(col)
+
+ltab=conn2tab(col)
+contab=ltab.o(0)
+wtab[0]=ltab.o(1)
+wtab[1]=ltab.o(2)
+mtab=ltab.o(3)
+

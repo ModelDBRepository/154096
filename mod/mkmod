@@ -1,0 +1,342 @@
+#!/usr/bin/perl
+# $Id: mkmod,v 1.76 2011/08/17 14:28:56 billl Exp $
+# mkmod is the updated version of makemod using nmodl INCLUDE statements
+# Most mechanisms can be inserted by using a sparse declaration that utilizes
+# INCLUDE.  
+#________________________________________________________________
+# E.G.
+# NEURON {
+#   SUFFIX NAME
+# }
+#
+# PARAMETER {
+#   param1 = 15
+#   ...
+# }
+#
+# INCLUDE "body.inc"
+#________________________________________________________________
+# 
+# mod files that are to simply be compiled as is should use the
+# DEFAULT key word 
+# 
+
+$file = "parameters.multi";  # default name
+$filecreate = 1;
+$nsp = $condor = 0;
+$nrnmodlflag = 1;
+$uname = $ENV{"CPU"};
+$neuronhome = $ENV{"NEURON"};
+
+$nrnmodl = "nrnivmodl";
+$loadflags="";
+
+if (-f $ARGV[0]) { 
+    $file = shift; 
+    $nsp = 1;  # new special
+    $oldsp="$uname/special"; $newsp=$file; $newsp =~ s/([^.]+).multi/\1/;
+    $oldlib="$uname/.libs/libnrnmech.so.0.0.0"; 
+    $newlib = "$uname/.libs/libnrnmech.".$newsp;
+    $newsp = "$uname/special.".$newsp; 
+    if (-f $oldsp) {
+      rename($oldsp,"spe.SAV");
+      rename($oldlib,"lib.SAV");
+    } else { die "$oldsp not found\n"; }
+    print "Using $file as input file.\n";
+} elsif ($ARGV[0] == 1) { 
+    # dummy argument to move on to rest of arg list
+    shift;
+}
+
+# if first arg is nrnmodl just run nrnmodl else
+# take the first arg to be a file name if it exists
+if ($ARGV[0] eq "nrnmodl") {
+    $filecreate = 0; shift;
+} elsif ($ARGV[0] eq "create") { 
+    $nrnmodlflag = 0; shift;
+} elsif ($ARGV[0] eq "nrnoc") { 
+    $nrnmodl = "$neuronhome/bin/nrnocmodl"; shift;
+} elsif ($ARGV[0] eq "profile") { 
+    $nrnmodl = "/usr/local/src/nrniv/local/bin/nrnivmodl.prof"; shift;
+} elsif ($ARGV[0] eq "condor") { 
+    $condor = 1;
+    $filecreate = 0;
+    print "Using $neuronhome/bin/nrnivmodl\n";
+    $nrnmodl = "condor_compile $neuronhome/bin/nrnivmodl"; shift;
+} elsif ($ARGV[0] eq "condordebug") { 
+    $condor = 1;
+    $filecreate = 0;
+    print "Using $neuronhome/bin/nrnivmodl.condor.debug\n";
+    $nrnmodl = "condor_compile $neuronhome/bin/nrnivmodl.condor.debug"; shift;
+} elsif ($ARGV[0] eq "localcondor") { 
+    $condor = 1;
+    $filecreate = 0;
+    $nrnmodl = "/usr/local/src/nrniv/local/bin/nrnivmodl.localcondor"; shift;
+} elsif ($ARGV[0] eq "ldflags") {
+    shift;
+    $nrnmodl = qq|nrnivmodl -loadflags "$ARGV[0]"|; shift
+} elsif ($ARGV[0] eq "nocmodl") { 
+    $nrnmodl = "$neuronhome/bin/nrnocmodl"; 
+    $filecreate = 0; shift;
+} elsif ($ARGV[0] eq "clean") { 
+    $nrnmodlflag = 0; $filecreate = 0; $clean = 1; shift;
+} elsif ($ARGV[0] eq "files") {
+    shift; $grep = "@ARGV"; $#ARGV=-1; # clear out rest of the args 
+    $nrnmodlflag = 0; $filecreate = 0; $fullname=1; 
+} elsif ($ARGV[0] eq "tar") {
+    shift; @ATAR = @ARGV; $#ARGV=-1; # clear out rest of the args 
+    $nrnmodlflag = 0; $filecreate = 0; $fullname=1;  $tar=1;
+} elsif ($ARGV[0] eq "zip") {
+    shift; 
+    if ($ARGV[0] =~ /-f/) { # a list of additional files
+      open(F,$ARGV[1]);
+      while (<F>) {chop; push(@ATAR,$_);}
+    } else {
+      @ATAR = @ARGV; $#ARGV=-1; # clear out rest of the args 
+    }
+    $nrnmodlflag = 0; $filecreate = 0; $fullname=1;  $tar=2;
+} elsif ($ARGV[0] eq "grep") {
+    shift; $grep = "@ARGV"; $#ARGV=-1; # clear out rest of the args 
+    $nrnmodlflag = 0; $filecreate = 0;
+} elsif ($ARGV[0] eq "help") { 
+    shift;
+    die "\nnrnmodl [filename] [flag or [mech1 mech2 ...]]
+      if filename is not given assumed to be parameters.multi
+      name can be given fully or with .multi assumed
+
+    possible flags are:
+      create - produce new .mod files but do not run nrnmodl
+      nrnmodl - just run nrnmodl, all .mod files should already be present
+      nrnoc or nocmodl  - run $neuronhome/bin/nrnocmodl
+      grep - just show the compile command
+
+    if mech names are given only these will be recreated for recompilation
+\n";
+}
+
+if ($#ARGV > -1) {
+    print "Only recompile: @ARGV\n";
+    grep($sections{$_}=1,@ARGV); # convert to associative array
+}    
+
+# file to read from, usually parameters.multi
+if (!open(IN,$file)) { `nrnivmodl`; exit; }
+
+# will use MODL_INCLUDE path to look for .mod files
+@modpath = split(/[ :]/,$ENV{MODL_INCLUDE});
+$site = ($ENV{SITE} or "/usr/site");
+print "Search path for mod files is @modpath\n";
+
+# block starts with NEURON { SUFFIX NAME }
+$block_regexp = '^NEURON\s*{\s*((POINT_PROCESS)|(SUFFIX))\s+(\w+)';
+@lines = ();			# save lines for blocks of statements
+$curfile = "";			# name of file for a given block
+(! -l "../$uname") and (symlink("mod/$uname","../$uname") || die "ERROR: Can't create link from ../$uname\n");
+
+while (<IN>) {
+  if ($_ =~ /$block_regexp/) {
+    $curfile && &printit;	# print the previous block
+    $curfile = $4;		# name comes from the 4th parenset in block_regexp
+    if ($clean && -f ($objfile = $ENV{"CPU"}."/".$curfile.".o")) {
+      print "Remove $objfile.\n"; unlink($objfile);
+    }
+    push(@lines,$_);
+
+  } elsif ($_ =~ /^LDFLAGS (.+)/) {
+    $loadflags .= qq| $1|;
+  } elsif ($_ =~ /^DEFAULT/) {
+    $curfile && &printit;	# finish off a block if needed
+    split; $filename = $_[1].".mod";
+    push(@modfiles,$_[1]);	# stem only to run nrnmodl on
+    if (($clean || $sections{$_[1]}) && -f ($objfile = $ENV{"CPU"}."/".$_[1].".o")) {
+      print "Remove: $objfile.\n"; unlink($objfile);
+    }
+    if ($_[2] =~ /[0-9]+/ && $filecreate) { # a version number
+      $co = 0;			# a flag
+      if (-e "RCS/$filename,v") {
+	print "Checking out version 1.$_[2] of $filename.\n";
+	$co = 1;
+	`co -r1.$_[2] $filename`;
+      } else {
+	foreach $dir (@modpath) { # look for the file and create link
+	  if (-e "$dir/RCS/$filename,v") { # save and terminate loop
+	    print "Checking out version 1.$_[2] of $dir/$filename.\n";
+	    unlink($filename);
+	    # must use full RCS path to get file into current dir
+	    # instead of into remote directory
+	    `co -r1.$_[2] $dir/RCS/$filename,v`;
+	    $co = 1;
+	    last; 
+	  }
+	}
+      }
+      ($co==1) || die "WARNING RCS VERSION FOR $filename NOT FOUND.\n";
+      # look for the file in MODL_INCLUDE path
+    } elsif (-e $filename) {	
+      $co = 1;
+    } else {
+      $co = 0;
+      foreach $dir (@modpath) { # look for the file and create link
+	if (-e "$dir/$filename") { # save and terminate loop
+	  $co = 1;
+	  symlink("$dir/$filename",$filename) || die "can't link to $dir/$filename\n";
+	  last;
+	}
+      }
+    }
+    if ($co == 0 && $filecreate) { # couldn't find the file so look for RCS
+      if (-e "RCS/$filename,v") {
+	print "Checking out $filename.\n";
+	$co = 1; `co $filename`;
+      } else {
+	foreach $dir (@modpath) { # look for the file and create link
+	  if (-e "$dir/RCS/$filename,v") { # save and terminate loop
+	    print "Checking out $dir/$filename.\n";
+	    `co $dir/$filename`;
+	    symlink("$dir/$filename",$filename);
+	    $co = 1;
+	    last; 
+	  }
+	}
+      }
+    }
+    if (`grep -c //@ $filename`+0 > 0) { # look for '//@' which will need processing
+      push(@modfiles,pop(@modfiles)."_"); # stem_
+      $f1="$modfiles[$#modfiles].mod";
+      if ((! -f $f1) || (-M $filename < -M $f1)) {
+	&verbatize($filename); # replace //@ with bracketing VERBATIM/ENDVERBATIM
+      }
+    }
+    ($co==1) || die "$filename NOT FOUND; check env variable MODL_INCLUDE.\n";
+  } elsif ($#lines >= 0) {  	# only add lines if in a block
+    push(@lines,$_);
+  }
+}
+
+# need to do terminal check
+$curfile && &printit;
+
+$nrnmodlflag || print "COMPILATION COMMAND: \n";
+# tell user the mod files being included
+print "\t$nrnmodl @modfiles\n"; 
+if ($grep) {
+    grep($_.=".mod",@modfiles); # put .mod back on ends for filenames
+    print "grep $grep @modfiles\n";
+    system("grep $grep @modfiles");
+}
+if ($fullname) {
+    grep($_.=".mod",@modfiles); # put .mod back on ends for filenames
+    open(GREP,"grep INCLUDE @modfiles|");
+    while (<GREP>) {
+      if (/"/) { 
+         s/[^"]+"([^"]+)"/\1/;
+	 $filename=$_; chop $filename;
+	 if (grep($_ eq $filename,@modfiles)) { next; }
+	 push(@modfiles,$filename);
+         if (! -e $filename) {	
+	   foreach $dir (@modpath) { # look for the file and create link
+	     if (-e "$dir/$filename") { # save and terminate loop
+	       symlink("$dir/$filename",$filename) || die "can't link to $dir/$filename\n";
+	       last;
+	     }
+	   }
+	 }
+       }
+    }
+    print "\n\t@modfiles\n";
+    if ($tar) {
+      $dstr = "b".`datestring`;
+      print (($tar==1)?
+	     "Creating $dstr.tar; use 'tar rhf $dstr.tar $dstr/filename' if need to append\n":
+	     "Creating $dstr.zip; use 'zip -g $dstr.zip $dstr/filename' if need to append\n");
+      symlink(".",$dstr);
+      if (-e "../batch_.hoc"){
+	symlink("../batch_.hoc","batch_.hoc"); 
+	push(@modfiles,"batch_.hoc"); 
+      } else {
+	print "\tNO batch_.hoc\n";
+      }
+      symlink("$site/nrniv/local/mod/misc.h","misc.h"); 
+      push(@modfiles,"misc.h"); 
+      if (! -e "data") {
+	mkdir data;
+	push(@modfiles,"data"); 
+      } else {
+	print "data/ dir exists -- not including\n";
+      }
+      foreach $file (@ATAR) { 
+	($d,$f)= ($file =~ m|^(.+)/([^/]+)$|);
+	if ($d!~/^$/) {
+	  symlink("$file","$f");  
+	  push(@links,$f);
+	} else {
+	  $f=$file;
+	}
+	push(@modfiles,$f);
+      }
+      grep($_="$dstr/$_",@modfiles);
+      if ($tar==1) {`tar czhf $dstr.tgz @modfiles`;} else {
+	unlink $dstr.zip;
+	`zip $dstr.zip @modfiles`;
+      }
+      unlink $dstr;
+      unlink @links;
+    }
+}
+if ($nrnmodlflag) {
+    if ($loadflags) { $nrnmodl .= qq| -loadflags "$loadflags"|; }
+    (system("export DEFAULT_INCLUDES=-I/$site/nrniv/local/mod;$nrnmodl @modfiles") == 0) || 
+      die "ERROR IN COMPILATION\n";
+}
+
+if ($nsp) {   # new special
+  open(IN,$oldsp);
+  open(OUT,"> $newsp");
+  while (<IN>) {
+    $_ =~ /libnrnmech/ and s|$uname/.libs/libnrnmech.so|$newlib|;
+    print OUT;
+  }
+  close IN; close OUT; chmod 0755, $newsp;
+  print "\t******** Moving special to $newsp ********\n";
+  rename($oldlib,$newlib);
+  rename("spe.SAV",$oldsp);
+  rename("lib.SAV",$oldlib);
+}
+
+# print lines into a new file called $curfile.mod
+# clear the lines array and the curfile name
+sub printit { 
+    push(@modfiles,$curfile);	# name of a file to run nrnmodl on
+    if ($filecreate && (! %sections || $sections{$curfile})) {
+	$curfile .= ".mod";	# real file name
+	if ((! -f $curfile) || (-M $file < -M $curfile)) {
+	  print "Creating $curfile\n";
+	  open(OUT,"> $curfile") || die "Can't open $curfile.\n";
+	  print OUT @lines;
+	  close(OUT);
+	}
+    }
+    @lines = ();		# clear the array
+    $curfile = "";
+}
+
+# verbatize makes a line marked by //@ into a VERBATIM block
+# need to sheer off the '{' and anything following so that brackets match for nocmodl
+# NB can't use if/else block where the if is VERBATIM since then the else is unprecedented
+# for nocmodl
+sub verbatize {
+  ($in)=@_;
+  $out=$in; $out=~s/\.mod/_.mod/;
+  open(I,"<$in"); open(O,">$out"); 
+  while (<I>) {
+    if (m|//@|) {
+      if (m|([^{]+)({.+)//.+|) {
+	print O "VERBATIM\n$1\nENDVERBATIM\n$2\n";
+      } else {
+	print O "VERBATIM\n$_\nENDVERBATIM\n";
+      }
+    } else {
+      print O;
+    }
+  }
+}

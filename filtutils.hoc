@@ -1,0 +1,185 @@
+// $Id: filtutils.hoc,v 1.11 2011/11/07 21:37:48 samn Exp $ 
+
+print "Loading filtutils.hoc..."
+
+//* mkgauss(vector,average,standard-dev)
+proc mkgauss () { local i,x,sz,mu,sd localobj vin
+  vin=$o1 sz=vin.size mu=$2 sd=$3
+  for vtr(&x,vin,&i) vin.x(i) = exp( -(x-mu)^2 / (2*sd*sd) )
+  vin.mul( 1 / (sd*sqrt(2*PI)) )
+}
+
+//* mktriangwin(vec,size - should be odd,[skip the wraparound])
+proc mktriangwin () { local i,j,sz localobj vin
+  vin=$o1 vin.resize($2)
+  vin.x(int($2/2))=1
+  j=1 sz=1/(vin.size/2)
+  for (i=int($2/2)-1;i>=0;i-=1) {
+    vin.x(i)=j
+    j-=sz
+  }
+  j=1
+  for i=int($2/2)+1,vin.size-1 {
+    vin.x(i)=j
+    j-=sz
+  }
+  vin.div(vin.sum)
+  if(numarg()>2) return
+  vin.wraparound(vin.size)
+}
+
+//* mkgaussfilt(vec,stdev[,vx])
+proc mkgaussfilt () { local sd,minx,maxx,dx,a localobj vin,vx
+  vin=$o1 sd=$2
+  if(numarg()>2) {vx=$o3 vin.resize(0) vin.copy(vx)}
+  mkgauss(vin,0,sd)
+  vin.wraparound(vin.size)
+  vin.div(vin.sum)
+  dealloc(a)
+}
+
+//* dofilt(vsignal,vwindow) - filters with convlv
+proc dofilt () { local a,i localobj vsig,vwin,vtmp
+  a=allocvecs(vtmp) vsig=$o1 vwin=$o2 sz=vsig.size
+  vtmp.convlv(vsig,vwin)
+  vsig.copy(vtmp)
+  vsig.resize(sz) // make sure size doesn't change
+  dealloc(a)  
+}
+
+//* triangfilt(vin,filtsize) - run a triangle filter
+proc triangfilt () { local a localobj vin,vwin
+  vin=$o1
+  a=allocvecs(vwin)
+  mktriangwin(vwin,$2) // make the window
+  dofilt(vin,vwin) // do the filtering
+  dealloc(a)
+}
+
+//* boxfilt(vin,filtsize) - run a box(moving average) filter
+proc boxfilt () { local a localobj vin,vwin
+  vin=$o1
+  a=allocvecs(vwin)
+  {vwin.resize($2) vwin.fill(1) vwin.div(vwin.size)} // make the window
+  dofilt(vin,vwin) // do the filtering
+  dealloc(a)
+}
+
+//* gaussfilt(vin,stdev,vx) - run a gaussian filter - vx is x-values used to make gaussian
+proc gaussfilt () {  local a,sd localobj vin,vwin,vx
+  vin=$o1 sd=$2 vx=$o3
+  a=allocvecs(vwin)
+  mkgaussfilt(vwin,sd,vx) // make the window
+  dofilt(vin,vwin) // do the filtering
+  dealloc(a)
+}
+
+//* myfilt(code,vec) - code:0=gauss,1=triangle,2=box
+proc myfilt () { local a localobj vx
+  if($1==0) {
+    a=allocvecs(vx)
+    vx.indgen(-3,3,.03)
+    gaussfilt($o2,stdg,vx)
+  } else if($1==1) {
+    triangfilt($o2,winsz)
+  } else if($1==2) {
+    boxfilt($o2,winsz)
+  }
+}
+
+//* resample(vec,new size) - resample a vec to new size using linear interpolation
+proc resample(){ local newsz,idxdest,idxsrc,val,fctr,frac localobj vtmp
+  {vtmp=new Vector($2) fctr=$o1.size/$2  vtmp.x(0)=$o1.x(0) idxsrc=fctr}
+  for(idxdest=1;idxdest<$2-1;idxdest+=1){
+    idxsrc = idxdest * fctr
+    frac = idxsrc - int(idxsrc)
+    idxsrc = int(idxsrc)
+    if(idxsrc+1>=$o1.size){
+      vtmp.x(idxdest) = $o1.x(idxsrc)
+      continue
+    }
+    val = (1-frac) * $o1.x(idxsrc) + frac * $o1.x(idxsrc+1)
+    vtmp.x(idxdest) = val
+  }
+  {vtmp.x($2-1)=$o1.x($o1.size-1) $o1.resize($2) $o1.copy(vtmp)}
+}
+
+//* bandfilt(datavector,low frequency,high frequency[,window size for bandpass filter])
+// bandpass filter using via FFT convolution, $o1 will be modified
+func bandfilt () { local a,idx,hz,lohz,hihz,wsz localobj v1,vwin,v2
+  if(!name_declared("INSTALLED_myfft")){printf("bandfilt ERRA: myfft.mod not installed!\n") return 0}
+  {v1=$o1  lohz=$2  hihz=$3}
+  if(numarg()>3)wsz=$4 else wsz=1025
+  a=allocvecs(vwin,v2)
+  vwin.resize(wsz)
+  vwin.bpwin(lohz/sampr,hihz/sampr) //make bandpass windowed sinc
+  vwin.wraparound(wsz) //wrap around for FFT convolution
+  v2.convlv(v1,vwin)
+  v1.copy(v2)
+  dealloc(a)
+  return 1
+}
+
+//* multfilt(inputvector,outputvector,vector of lowfrequencies,vector of highfrequencies)
+//get superposition of multiple frequency bands, each pair in $o3,$o4 should be considered a band
+func multfilt () { local a,i localobj vtmp,vin,vout,vlo,vhi
+  if(!name_declared("INSTALLED_myfft")) {printf("multfilt ERRA: myfft.mod not installed!\n") return 0}
+  a=allocvecs(vtmp)
+  vin=$o1 vout=$o2 vlo=$o3 vhi=$o4
+  for i=0,vlo.size-1 {
+    vtmp.copy(vin)
+    bandfilt(vtmp,vlo.x(i),vhi.x(i))
+    if(i==0)vout.copy(vtmp) else vout.add(vtmp)
+  }
+  vout.resize(vin.size)
+  dealloc(a)  
+  return 1
+}
+
+//* nrnpsd(vector,samplingrate) - calculates PSD and returns as an NQS object
+// uses NEURON spctrm function
+obfunc nrnpsd () { local sampr localobj vec,nqp
+  vec=$o1 sampr=$2
+  nqp=new NQS("f","pow")
+  nqp.v[1].spctrm(vec)
+  nqp.v.indgen(0,sampr/2,(sampr/2)/nqp.v[1].size)
+  nqp.v.resize(nqp.v[1].size)
+  return nqp
+}
+
+//* mkprefftwin(outputvec,windowtype[,windowsize]) - make window for multiplying before running fft
+proc mkprefftwin () { local pref,sz localobj vpre
+  vpre=$o1 pref=$2
+  if(numarg()>2) sz=$3 else sz=vpre.size
+  vpre.resize(sz)
+  if(pref==1) {
+    vpre.blackmanwin()
+  } else if(pref==2) {
+    vpre.hanningwin()
+  } else if(pref==3) {
+    vpre.hammingwin()
+  } else {printf("mkprefftwin ERRA: unknown window type!\n") return}
+}
+
+//* getspecnq(vec,sampr[,specty,prefilt])
+obfunc getspecnq () { local sampr,specty,pref,a localobj vec,vpre,v2,nq
+  vec=$o1 sampr=$2 nq=nil
+  if(numarg()>2) specty=$3 else specty=0
+  if(numarg()>3) pref=$4 else pref=0
+  if(pref) { // pre-fft filtering
+    a=allocvecs(vpre,v2)
+    vpre.resize(vec.size)
+    mkprefftwin(vpre,pref)
+    v2.copy(vec)
+    v2.mul(vpre)
+    vec=v2
+  }
+  if(specty==0) nq=pypmtm(vec,sampr)
+  if(specty==1) nq=pypsd(vec,sampr)
+  if(specty==2) nq=matpmtm(vec,sampr)
+  if(specty==3) nq=nrnpsd(vec,sampr)
+  if(specty==4) nq=pybspow(vec,sampr)
+  if(pref) dealloc(a)
+  return nq
+}
+

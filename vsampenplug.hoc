@@ -1,0 +1,66 @@
+// $Id: vsampenplug.hoc,v 1.4 2010/09/27 21:40:25 samn Exp $ 
+
+
+// "plugin" (for batch.hoc) to do analysis on sim data
+
+binsz = 2.5 // bin size in ms
+initAllMyNQs() // initialize counts per time, by type, column, etc.
+
+objref nqs
+objref vintraty[numcols][CTYPi] // each type, within column
+objref vintraE[numcols]         // all Es within column
+objref vintraI[numcols]         // all Is within column
+objref vinterty[CTYPi]          // each type, across columns
+objref vinterE,vinterI          // all Es,Is across columns
+objref vty
+
+{vty=new Vector() vty.append(E2,I2)}
+
+sz=nqCTY[0].v[E2].size
+
+nqs=new NQS("col","sampen","ty","ice","idx")
+
+{vinterE=new Vector(sz) vinterI=new Vector(sz)}
+for i=0,CTYPi-1 if(col.numc[i]) vinterty[i]=new Vector(sz)
+for i = 0 , numcols - 1 { // setup all the vectors that will have matfftpow run on them
+  {vintraE[i]=new Vector(sz)  vintraI[i]=new Vector(sz)}
+  for j = 0, CTYPi - 1 {
+    if(nqCTY[i].v[j].size>0) {
+      
+      vintraty[i][j]=new Vector(sz)
+      vintraty[i][j].copy(nqCTY[i].v[j])
+      
+      vinterty[j].add(nqCTY[i].v[j])
+
+      if(ice(j)) {
+        vintraI[i].add(nqCTY[i].v[j])
+        vinterI.add(nqCTY[i].v[j])
+      } else {
+        vintraE[i].add(nqCTY[i].v[j])
+        vinterE.add(nqCTY[i].v[j])
+      }
+    }
+  }
+}
+
+proc myrsz () { local i,sz,winsz
+  {vec.resize(0) winsz=400 sz=$o2.size}
+  for(i=0;i<sz;i+=winsz) {
+    vec.copy($o2,i,i+winsz-1)
+    nqs.append($1,vec.vsampen,$3,$4,i)
+  }
+}
+
+{myrsz(-1,vinterE,-1,0) myrsz(-1,vinterI,-2,1)}
+
+for i=0,CTYPi-1 if(vinterty[i]!=nil && vty.contains(i)) myrsz(-1,vinterty[i],i,ice(i))
+
+for i=0,numcols-1 {
+  {myrsz(i,vintraE[i],-1,0) myrsz(i,vintraI[i],-2,1)}
+  for j=0,CTYPi-1 if(vintraty[i][j]!=nil && vty.contains(j)) {
+    if(vintraty[i][j].size>0) myrsz(i,vintraty[i][j],j,ice(j))
+  }
+}
+
+sprint(tstr,"/u/samn/intfcol/data/%s_%gms_nqsampen.nqs",strv,binsz)
+nqs.sv(tstr)

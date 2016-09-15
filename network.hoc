@@ -1,0 +1,1233 @@
+// $Id: network.hoc,v 1.205 2012/01/20 02:50:20 samn Exp $
+
+//* Numbers and connectivity params
+
+declare("colW",1,"colH",1,"torus",1)
+declare("numcols",colW*colH)
+declare("dbgcols",0) // whether to debug columns by making them have the same wiring and inputs
+declare("colr",2) // maximal trans-column projection distance; 0 within col; 1 next col etc
+declare("colnq","o[5]","lcol",new List())
+declare("autotune",0,"useplast",1) // 
+declare("randsy",-1) // whether to randomize wts (iff non-zero). iff > 0 use uniform distrib, if < 0 use normal
+{sprint(tstr,"o[%d]",numcols) declare("col",tstr)}
+{sprint(tstr,"o[%d][%d]",colH,colW) declare("gcol",tstr)} // 2D column grid
+double div[CTYPi][CTYPi][colr+1]//div[i][j]==# of outputs from type i->j
+double wmat[CTYPi][CTYPi][STYPi][colr+1] // wmat[i][j][k]==weight from type i->j for synapse k
+double delm[CTYPi][CTYPi]//avg. delay from type i->j
+double deld[CTYPi][CTYPi]//delay variance from type i->j
+double conv[CTYPi][CTYPi][colr+1]
+dosetpmat=name_declared("pmat")==0
+{sprint(tstr,"d[%d][%d][%d]",CTYPi,CTYPi,colr+1) declare("pmat",tstr)}
+double prumat[CTYPi][CTYPi] //pruning matrix:prumat[i][j] specifies ratio (0-1) of synapses to prune
+double sprmat[CTYPi][CTYPi] //sprouting matrix:sprmat[i][j] specifies ratio (0-1) to sprout i->j pathway with
+double synloc[CTYPi][CTYPi]//location of synapses
+
+//* swire & related column variables
+declare("colside",30) // column diameter in micrometers
+declare("swire",3) // whether to use 'spatial' wiring, 2 means use swirecut, 3 means use swirecutfl
+declare("checkers",0) // whether to arrange cells in checkerboard pattern
+declare("cxinc",3,"cyinc",3,"crad",1)
+declare("EEsq",(colside/2)^2,"EIsq",(colside/2)^2,"IEsq",(colside/1)^2,"IIsq",(colside/2)^2) // params for swirecut
+double dels[CTYPi][CTYPi]//[STYPi] //stdev of delays
+double delv[CTYPi][CTYPi]//variance of delays
+double vcond[CTYPi][CTYPi]//[STYPi] //conduction velocities
+declare("layerzvar",25) // range of z location of cells in a layer (in micrometers)
+declare("colxydist",50) // distance between adjacent columns (x,y)
+declare("vlayerz",new Vector(CTYPi))
+declare("pseed",4321)
+declare("dvcond","d[2]") //intra layer conduction delays
+declare("maxsfall",0.001) // max fall-off in prob of connection @ opposite side of column (used by swire)
+declare("slambda",colside/3) // spatial length constant for probability of connections, used in swirecut
+dvcond[0] = 1   //if presynaptic cell is excit, conduction delay == 1.0 m/s
+dvcond[1] = 0.4 //if presynaptic cell is inhib, conduction delay == 0.4 m/s
+declare("lambda",30,"hval",0)
+declare("mknetnqss",1) // whether COLUMN should make connsnq,cellsnq
+declare("DopeRL",0) // whether to use dopamine-RL learning
+
+if(autotune) {
+  seadsetting_INTF6 = 2
+  wsetting_INTF6 = 1 // use sywv during sim
+} else if(useplast) {
+  wsetting_INTF6 = 1 // use sywv during sim
+  seadsetting_INTF6 = 3 // use plasticity
+} else {
+  seadsetting_INTF6 = 2
+  wsetting_INTF6 = 0
+}
+
+if(DopeRL) {
+  DOPE_INTF6=1
+  EDOPE_INTF6 = IDOPE_INTF6 = 1
+  ESTDP_INTF6 = ISTDP_INTF6 = 0  
+}
+
+declare("wnqstr","") // intracol wiring NQS (single column)
+
+//* prdiv() - print div
+proc prdiv () { local ii,jj
+  for ii=0,CTYPi-1 for jj=0,CTYPi-1 if(div[ii][jj][0]) {
+    printf("div[%s][%s][0]=%g\n",CTYP.o(ii).s,CTYP.o(jj).s,div[ii][jj][0])
+  }
+}
+
+// %con (con/pre) = %div (div/post)
+DEAD_DIV_INTF6=0
+declare("jcn",1)
+declare("disinhib",0) //iff==1 , turn off inhibition, by setting wmat[I%d][...]==0 in inhiboff()
+declare("scale",1) // 2 (takes a lot longer!)
+declare("pmatscale",1/scale) // scale for pmat - allows keeping it fixed while changing # of cells in network
+declare("wmatscale",1) // scale for wmat - called after setwmat
+declare("pmatEE",1,"pmatEI",1,"pmatIE",1,"pmatII",1) // scaling for pmat
+declare("onelyr",0) // whether to keep network as a single layer (L2/3)
+
+declare("fc",1)
+// declare("EEGain",fc*1,"EIGain",fc*1,"IEGain",fc*1,"IIGain",fc*1)
+declare("EEGain",4*15/11,"EIGain",15,"IEGain",4*15/11,"IIGain",4*15/11)
+declare("NMAMR",0.1,"EENMGain",1,"EIGainInterC",0.125,"EEGainInterC",0.325*0.5)
+
+batch_flag=declare("dstr",datestr,"setdviPT",NORM)
+declare("params","not batch","ofile",output_file)
+declare("dvseed",534023) // seed for wiring
+
+dosetcpercol=name_declared("cpercol")==0 // whether to set values in cpercol or use user-supplied values
+{sprint(tstr,"d[%d]",CTYPi) declare("cpercol",tstr)} // cells of a specific type per column
+declare("vcpercol",new Vector(CTYPi))
+declare("E5BNumF",1,"E5RNumF",1) // factors for # of E5 cells
+declare("newkmjnums",0) // use #s based on KMJ #s in  /u/samn/vcsim/data/Cell_Numbers.xlsx columns R, T, V
+declare("cc12vals",0) // use pmat,wmat,del #s from /u/samn/papers/gif/cc12:936_table1.gif
+declare("autogain",0) // automatically set EE,EI,IE,II gains based on whether using cc12vals
+
+if(autogain) {
+  print "WARNING: autogain is on!"
+  if(cc12vals) {
+    EEGain = fc*1
+    EIGain = fc*1
+    IEGain = fc*1
+    IIGain = fc*1
+  } else {
+    EEGain=4*15/11
+    EIGain=15
+    IEGain=4*15/11
+    IIGain=4*15/11
+  }
+}
+
+sprint(tstr,"d[%d][%d]",CTYPi,CTYPi)
+if(!(i=name_declared("delmscale"))) {
+  declare("delmscale",tstr) // scale delm values by this #
+}
+if(!i) {
+  for i=0,CTYPi-1 for j=0,CTYPi-1 delmscale[i][j]=1
+}
+
+//* setcpercol - set # of cells per column
+proc setcpercol () { local i // (/u/samn/vcsim/notebook.dol_1:24562)(notebook.dol_1:24492)
+  if(dosetcpercol) { // if user didn't supply values (default), set # of cells of a type per column
+    if(onelyr) {
+
+      cpercol[E2]  = 150 * scale
+      cpercol[I2L] =  13 * scale
+      cpercol[I2]  =  25 * scale
+
+    } else if(newkmjnums) {
+
+      // based on KMJ #s in  /u/samn/vcsim/data/Cell_Numbers.xlsx columns R, T, V
+
+      cpercol[E2] = 169 * scale
+      cpercol[I2] = 48 * scale
+      cpercol[I2L] = 8 * scale
+
+      cpercol[E4] = 83 * scale
+      cpercol[I4] = 24 * scale
+      cpercol[I4L] = 4 * scale
+
+      cpercol[E5R] = 93 * scale
+      cpercol[E5B] = 32 * scale
+      cpercol[I5] = 36 * scale
+      cpercol[I5L] = 6 * scale
+
+      cpercol[E6] = 218 * scale
+      cpercol[I6] = 62 * scale
+      cpercol[I6L] = 11 * scale
+
+    } else {
+      cpercol[E2]  = 150 * scale
+      cpercol[E4] =   30 * scale
+      cpercol[E5B] =  int(17 * scale * E5BNumF)
+      cpercol[E5R] =  int(65 * scale * E5RNumF)
+      cpercol[E6] =   60 * scale
+      cpercol[I2L] =  13 * scale
+      cpercol[I2]  =  25 * scale
+      cpercol[I4L] =  14 * scale 
+      cpercol[I4]  =  20 * scale
+      cpercol[I5L] =  13 * scale
+      cpercol[I5]  =  25 * scale
+      cpercol[I6L] =  13 * scale
+      cpercol[I6] =   25 * scale
+    }
+  }
+  {vcpercol.resize(CTYPi) vcpercol.fill(0)} // store the values in a vector
+  for i=0,CTYPi-1 vcpercol.x(i)=cpercol[i]
+}
+
+//* setpmat()
+proc setpmat () { local pre,po,ii,jj,kk,ct
+  if(!dosetpmat) return // if pmat setup by user (in notebook), then don't reset its values
+  for ii=0,CTYPi-1 for jj=0,CTYPi-1 for kk=0,1 pmat[ii][jj][kk]=0
+
+  if(cc12vals) {
+
+    for case(&ii,E5R,E5B) for case(&jj,E5R,E5B) pmat[ii][jj][0] = 1/11
+    pmat[E2][E2][0] = (1/4 + 1/10) / 2
+    pmat[E4][E4][0] = 1 / 5.7    
+    for case(&ct,E5R,E5B) pmat[E2][ct][0] = 1 / 1.8
+    for case(&ct,E5R,E5B) pmat[ct][E2][0] = 1 / 29
+    pmat[E4][E2][0] = 1 / 3.6    
+    for case(&ct,E5R,E5B) for case(&jj,I5,I5L) pmat[ct][jj][0] = 1 / 10.4
+    for case(&ct,I5,I5L) for case(&jj,E5R,E5B) pmat[ct][jj][0] = 1 / 8
+    //div by 2 are when cat/rat values differ, so take average
+    for case(&ct,I2,I2L) pmat[E2][ct][0] = (1/5 + 1/4) / 2
+    for case(&ct,I2,I2L) pmat[ct][E2][0] = (1/6.3 + 1/3.6) / 2
+    for case(&ct,I4,I4L) pmat[E4][ct][0] = 1 / 5
+    for case(&ct,I4,I4L) pmat[ct][E4][0] = 1 / 10
+    for case(&ct,I2,I2L) pmat[E4][ct][0] = 1 / 10    
+    for case(&ct,I4,I4L) pmat[E2][ct][0] = (1/12 + 1/5.3) / 2
+    for case(&ct,I4,I4L) pmat[ct][E2][0] = (1/2 + 1/3.7) / 2       
+    for case(&ct,I2,I2L) for case(&jj,I2,I2L) pmat[ct][jj][0] = (1/4 + 1) / 2
+    for case(&ct,I4,I4L) for case(&jj,I4,I4L) pmat[ct][jj][0] = 1/2
+    for case(&ct,I5,I5L) for case(&jj,I5,I5L) pmat[ct][jj][0] = 1 / 1.7
+    for case(&ct,I4,I4L) for case(&jj,I2,I2L) pmat[ct][jj][0] = 1 / 2 // 1:1 but keeping @ 50%
+    // for L6, no data from that paper, so guessing & using KMJ values
+    pmat[E6][E5B][0]=0.028 * 3
+    pmat[E6][E5R][0]=0.006 * 3
+    pmat[E6][E6][0]=0.028 * 3
+    pmat[E6][I6L][0]=0.51
+    pmat[E6][I6][0]=0.43
+    pmat[E6][I6][1]=0.14
+    pmat[I6L][E2][0]=0.35
+    pmat[I6L][E5B][0]=0.25
+    pmat[I6L][E5R][0]=0.25
+    pmat[I6L][E6][0]=0.35
+    pmat[I6L][I2][0]=0.53
+    pmat[I6L][I5][0]=0.53
+    pmat[I6L][I6L][0]=0.09
+    pmat[I6L][I6][0]=0.53
+    pmat[I6][E6][0]=0.44
+    pmat[I6][I6L][0]=0.34
+    pmat[I6][I6][0]=0.62    
+
+  } else {
+    pmat[E2][E2][0]=0.187 
+    pmat[E2][E2][1]=0//0.14
+    pmat[E2][E4][0]=0.024
+    pmat[E2][E5B][0]=0.024
+    pmat[E2][E5R][0]=0.057
+    pmat[E2][E6][0]=0
+    pmat[E2][I2L][0]=0.51
+    pmat[E2][I2][0]=0.43
+    pmat[E2][I2][1]=0.14
+    pmat[E4][E2][0]=0.145
+    pmat[E4][E4][0]=0.243 
+    pmat[E4][E5B][0]=0.122
+    pmat[E4][E5R][0]=0.116
+    pmat[E4][E6][0]=0.032
+    pmat[E4][I4L][0]=0.51
+    pmat[E4][I4][0]=0.43
+    pmat[E4][I4][1]=0.14
+    pmat[E5B][E2][0]=0.018
+    pmat[E5B][E2][1]=0.25
+    pmat[E5B][E2][2]=0.1
+    pmat[E5B][E4][0]=0.007
+    pmat[E5B][E5B][0]=0.07 
+    pmat[E5B][E5B][1]=0.25 
+    pmat[E5B][E5B][2]=0.1 
+    pmat[E5B][E5R][0]=0.017 
+    pmat[E5B][E5R][1]=0.25 
+    pmat[E5B][E5R][2]=0.1
+    pmat[E5B][E6][0]=0.07
+    pmat[E5B][I2L][1]=0.14
+    pmat[E5B][I2L][2]=0.07
+    pmat[E5B][I5L][0]=0.51
+    pmat[E5B][I5L][1]=0.14
+    pmat[E5B][I5L][2]=0.07
+    pmat[E5B][I5][0]=0.43
+    pmat[E5B][I5][1]=0.14
+    pmat[E5B][I5][2]=0.07
+    pmat[E5R][E2][0]=0.022
+    pmat[E5R][E4][0]=0.007
+    pmat[E5R][E5B][0]=0.08 
+    pmat[E5R][E5B][1]=0.25 
+    pmat[E5R][E5R][0]=0.191 
+    pmat[E5R][E5R][1]=0.14 
+    pmat[E5R][E6][0]=0.032
+    pmat[E5R][I5L][0]=0.51
+    pmat[E5R][I5][0]=0.43
+    pmat[E5R][I5][1]=0.14
+    pmat[E6][E2][0]=0
+    pmat[E6][E4][0]=0
+    pmat[E6][E5B][0]=0.028
+    pmat[E6][E5R][0]=0.006
+    pmat[E6][E6][0]=0.028
+    pmat[E6][I6L][0]=0.51
+    pmat[E6][I6][0]=0.43
+    pmat[E6][I6][1]=0.14
+    pmat[I2L][E2][0]=0.35
+    pmat[I2L][E5B][0]=0.5
+    pmat[I2L][E5R][0]=0.35
+    pmat[I2L][E6][0]=0.25
+    pmat[I2L][I2L][0]=0.09
+    pmat[I2L][I2][0]=0.53
+    pmat[I2L][I5][0]=0.53
+    pmat[I2L][I6][0]=0.53
+    pmat[I2][E2][0]=0.44
+    pmat[I2][I2L][0]=0.34
+    pmat[I2][I2][0]=0.62
+    pmat[I4L][E4][0]=0.35
+    pmat[I4L][I4L][0]=0.09
+    pmat[I4L][I4][0]=0.53
+    pmat[I4][E4][0]=0.44
+    pmat[I4][I4L][0]=0.34
+    pmat[I4][I4][0]=0.62
+    pmat[I5L][E2][0]=0.35
+    pmat[I5L][E5B][0]=0.35
+    pmat[I5L][E5R][0]=0.35
+    pmat[I5L][E6][0]=0.25
+    pmat[I5L][I2][0]=0.53
+    pmat[I5L][I5L][0]=0.09
+    pmat[I5L][I5][0]=0.53
+    pmat[I5L][I6][0]=0.53
+    pmat[I5][E5B][0]=0.44
+    pmat[I5][E5R][0]=0.44
+    pmat[I5][I5L][0]=0.34
+    pmat[I5][I5][0]=0.62
+    pmat[I6L][E2][0]=0.35
+    pmat[I6L][E5B][0]=0.25
+    pmat[I6L][E5R][0]=0.25
+    pmat[I6L][E6][0]=0.35
+    pmat[I6L][I2][0]=0.53
+    pmat[I6L][I5][0]=0.53
+    pmat[I6L][I6L][0]=0.09
+    pmat[I6L][I6][0]=0.53
+    pmat[I6][E6][0]=0.44
+    pmat[I6][I6L][0]=0.34
+    pmat[I6][I6][0]=0.62
+  }
+}
+
+//* scalepmat(fctr[,EE,EI,IE,II]) - multiply values in pmat by fctr
+proc scalepmat () { local fctr,EE,EI,IE,II,from,to,cl
+  fctr=$1 
+  for from=0,CTYPi-1 for to=0,CTYPi-1 for cl=0,1 pmat[from][to][cl] *= fctr
+  if(numarg()==5) {
+    EE=$2 EI=$3 IE=$4 II=$5
+    for from=0,CTYPi-1 for to=0,CTYPi-1 for cl=0,1 {
+      if(ice(from)) {
+        if(ice(to)) {
+          pmat[from][to][cl] *= II
+        } else {
+          pmat[from][to][cl] *= IE
+        }
+      } else {
+        if(ice(to)) {
+          pmat[from][to][cl] *= EI
+        } else {
+          pmat[from][to][cl] *= EE
+        }
+      }
+    }
+  }
+}
+
+//* pmat2nq - return an NQS with info in pmat
+obfunc pmat2nq () { local i,j,k localobj nqpmat
+  nqpmat=new NQS("froms","tos","from","to","cold","pij")
+  {nqpmat.strdec("froms") nqpmat.strdec("tos")}
+  for i=0,CTYPi-1 for j=0,CTYPi-1 for k=0,colr if(pmat[i][j][k]) {
+    nqpmat.append(CTYP.o(i).s,CTYP.o(j).s,i,j,k,pmat[i][j][k])
+  }  
+  return nqpmat
+}
+
+//* nq2pmat - load NQS ($o1) into pmat
+proc nq2pmat () { local i,j,k localobj nq,vf,vto,vc,vpij
+  {nq=$o1 nq.tog("DB") vf=nq.getcol("from") vto=nq.getcol("to") vc=nq.getcol("cold") vpij=nq.getcol("pij")}
+  for i=0,CTYPi-1 for j=0,CTYPi-1 for k=0,colr pmat[i][j][k]=0
+  for i=0,vf.size-1 pmat[vf.x(i)][vto.x(i)][vc.x(i)]=vpij.x(i)
+  print "loaded " , nq , " into pmat"
+}
+
+//* synapse locations DEND SOMA AXON
+proc setsynloc () { local from,to
+  for from=0,CTYPi-1 for to=0,CTYPi-1 {
+    if(ice(from)) {
+      if(IsLTS(from)) {
+        synloc[from][to]=DEND // distal [GA2] - from LTS
+      } else {
+        synloc[from][to]=SOMA // proximal [GA] - from FS
+      }
+    } else {
+      synloc[from][to]=DEND // E always distal. use AM2,NM2
+    }
+  }
+}
+
+//* setdelmats -- setup delm,deld
+proc setdelmats () { local from,to,ii,jj,ct
+  if(cc12vals) {
+
+    for case(&ii,E5R,E5B) for case(&jj,E5R,E5B) delm[ii][jj] = (1.8+1.5)
+    for case(&ii,E5R,E5B) for case(&jj,E5R,E5B) deld[ii][jj] = (1.4+0.15)
+
+    delm[E2][E2] = (1.86+2.5)/2 + (1.5+1.7)/2
+    deld[E2][E2] = (0.8+1.3)/2 + (0.3+0.79)/2
+
+    delm[E4][E4] = 2 + .6
+    deld[E4][E4] = 1.5 // unknown
+
+    for case(&ct,E5R,E5B) delm[E2][ct] = 2 + 1.4
+    for case(&ct,E5R,E5B) deld[E2][ct] = 0.9 + 0.3
+
+    for case(&ct,E5R,E5B) delm[ct][E2] = 2.6 //unknown
+    for case(&ct,E5R,E5B) deld[ct][E2] = 1.5 //unknown
+
+    delm[E4][E2] = 1.9 + 0.9 // using spiny stellate values, since others close anyway
+    deld[E4][E2] = 0.4 + 0.24
+
+    for case(&ct,E5R,E5B) for case(&jj,I5,I5L) delm[ct][jj] = 0.6 + 1.4
+    for case(&ct,E5R,E5B) for case(&jj,I5,I5L) deld[ct][jj] = 1 //unknown
+
+    for case(&jj,E5R,E5B) delm[I5][jj] = 4.2 + 1.1 - 2 // -2 since FS faster
+    for case(&jj,E5R,E5B) deld[I5][jj] = 2.8 + 0.2 - 1 // -1 since FS faster
+
+    for case(&jj,E5R,E5B) delm[I5L][jj] = 4.2 + 1.1 // LTS slightly slower
+    for case(&jj,E5R,E5B) deld[I5L][jj] = 2.8 + 0.2
+
+    for case(&ct,I2,I2L) delm[E2][ct] = (1.2+2.2)/2 + (1.3+0.95)/2
+    for case(&ct,I2,I2L) deld[E2][ct] = (.9+1.4)/2 + (.3+.2)/2
+
+    delm[I2][E2] = 3.9 + 1.8 -2 // -2 since FS faster
+    deld[I2][E2] = 1.5 + 0.8 -1 // -1 since FS faster
+
+    delm[I2L][E2] = 3.9 + 1.8
+    deld[I2L][E2] = 1.5 + 0.8
+
+    for case(&ct,I4,I4L) delm[E4][ct] = 0.7 + 1.2
+    for case(&ct,I4,I4L) deld[E4][ct] = 1 //unknown
+
+    delm[I4][E4] = 3.7 + 1.2 -2 // -2 since FS faster
+    deld[I4][E4] = 0.3 
+
+    delm[I4L][E4] = 3.7 + 1.2
+    deld[I4L][E4] = 0.3
+
+    for case(&ct,I2,I2L) delm[E4][ct] = 0.72 + 0.6
+    for case(&ct,I2,I2L) deld[E4][ct] = 0.04 + 0.1
+
+    for case(&ct,I4,I4L) delm[E2][ct] = 0.85 + 1.0
+    for case(&ct,I4,I4L) deld[E2][ct] = 0.2 + 0.2
+
+    delm[I4][E2] = (2.8+3+3.5+4.4)/4 + (1.1+1.0+0.8+1.9)/4 -2 // -2 since FS faster
+    deld[I4][E2] = (1.6 + 1.1)/2 -0.5 // -0.5 since FS faster
+
+    delm[I4L][E2] = (2.8+3+3.5+4.4)/4 + (1.1+1.0+0.8+1.9)/4 
+    deld[I4L][E2] = (1.6 + 1.1)/2 
+
+    for case(&jj,I2,I2L) delm[I2][jj] = (2+2.4+2.3+3.9)/4 + (0.7+1.5+1.0+0.8)/4 -2 // -2 since FS faster
+    for case(&jj,I2,I2L) deld[I2][jj] = (1.9+0.8)/2 -0.5 // -0.5 since FS faster
+
+    for case(&jj,I2,I2L) delm[I2L][jj] = (2+2.4+2.3+3.9)/4 + (0.7+1.5+1.0+0.8)/4 
+    for case(&jj,I2,I2L) deld[I2L][jj] = (1.9+0.8)/2 
+
+    for case(&jj,I4,I4L) delm[I4][jj] = (2.7+2.9)/2 + (0.8+1.1)/2 -2 // -2 since FS faster
+    for case(&jj,I4,I4L) deld[I4][jj] = 1.35 -0.5 // -0.5 since FS faster
+
+    for case(&jj,I4,I4L) delm[I4L][jj] = (2.7+2.9)/2 + (0.8+1.1)/2 
+    for case(&jj,I4,I4L) deld[I4L][jj] = 1.35 
+
+    //rest unknown
+
+    for case(&jj,I5,I5L) delm[I5][jj] = (2.7+2.9)/2 + (0.8+1.1)/2 -2 // -2 since FS faster
+    for case(&jj,I5,I5L) deld[I5][jj] = 1.35 -0.5 // -0.5 since FS faster
+
+    for case(&jj,I5,I5L) delm[I5L][jj] = (2.7+2.9)/2 + (0.8+1.1)/2  
+    for case(&jj,I5,I5L) deld[I5L][jj] = 1.35 
+
+
+    for case(&jj,I2,I2L) delm[I4][jj] = (2.7+2.9)/2 + (0.8+1.1)/2 -2 // -2 since FS faster
+    for case(&jj,I2,I2L) deld[I4][jj] = 1.35 -0.5 // -0.5 since FS faster
+
+    for case(&jj,I2,I2L) delm[I4L][jj] = (2.7+2.9)/2 + (0.8+1.1)/2
+    for case(&jj,I2,I2L) deld[I4L][jj] = 1.35 
+
+    // for L6, no data from that paper, so guessing & using KMJ values
+    delm[E6][E5B]= 3.8
+    deld[E6][E5B]= 1.6
+
+    delm[E6][E5R]= 3.8
+    deld[E6][E5R]= 1.6
+
+    delm[E6][E6]= 3.8
+    deld[E6][E6]= 1.6
+
+    delm[E6][I6L]= 2.825
+    deld[E6][I6L]= 1.4
+
+    delm[E6][I6]= 2.825
+    deld[E6][I6]= 1.4
+
+    for case(&ct,E2,E5B,E5R,E6) {
+      delm[I6L][ct]= 3.9 + 1.8
+      deld[I6L][ct]= 1.5 + 0.8
+    }
+
+    for case(&ct,I2,I5,I6L,I6) {
+      delm[I6L][ct]= (2+2.4+2.3+3.9)/4 + (0.7+1.5+1.0+0.8)/4 
+      deld[I6L][ct]= (1.9+0.8)/2 
+    }
+
+    delm[I6][E6]= 3.9 + 1.8 -2 // -2 since FS faster
+    deld[I6][E6]= 1.5 + 0.8 -1 // -1 since FS faster
+
+    for case(&ct,I6L,I6) {
+      delm[I6][ct]= (2+2.4+2.3+3.9)/4 + (0.7+1.5+1.0+0.8)/4 -2 // -2 since FS faster
+      deld[I6][ct]= (1.9+0.8)/2 -0.5 // -0.5 since FS faster
+    }
+
+  } else {
+    for from=0,CTYPi-1 for to=0,CTYPi-1 {
+      if(synloc[from][to]==DEND) {
+        delm[from][to]=4 * delmscale[from][to]
+        deld[from][to]=1
+      } else {
+        delm[from][to]=2.0 * delmscale[from][to]
+        deld[from][to]=0.2
+      }
+    }
+  }
+}
+
+//* weight params
+//** delay all 2+/-0.02 within column for now
+proc setwmat () { local ii,jj,from,to,sy,gn,c,fc,ct
+  for from=0,CTYPi-1 for to=0,CTYPi-1 for sy=0,STYPi-1 for c=0,colr wmat[from][to][sy][c]=0
+
+  if(cc12vals) {
+
+    for case(&ii,E5R,E5B) for case(&jj,E5R,E5B) wmat[ii][jj][AM2][0] = 1.7
+    wmat[E2][E2][AM2][0] = (1.7 + 1.4) / 2
+    wmat[E4][E4][AM2][0] = 1.1
+    for case(&ct,E5R,E5B) wmat[E2][ct][AM2][0] = 1.4
+    for case(&ct,E5R,E5B) wmat[ct][E2][AM2][0] = 0.3
+    wmat[E4][E2][AM2][0] = (1.1+3.3+5.9)/3
+    for case(&ct,E5R,E5B) for case(&jj,I5,I5L) wmat[ct][jj][AM2][0] = 0.9
+    for case(&ct,E5R,E5B) wmat[I5][ct][GA][0] = 1.23
+    for case(&ct,E5R,E5B) wmat[I5L][ct][GA2][0] = 1.23
+    //div by 2 are when cat/rat values differ, so take average 
+    for case(&ct,I2,I2L) wmat[E2][ct][AM2][0] = (1.9+3.1)/2
+    wmat[I2][E2][GA][0] = 0.65
+    wmat[I2L][E2][GA2][0] = 0.65
+
+    for case(&ct,I4,I4L) wmat[E4][ct][AM2][0] = 3.7
+    wmat[I4][E4][GA][0] = 0.85
+    wmat[I4L][E4][GA2][0] = 0.85
+
+    for case(&ct,I2,I2L) wmat[E4][ct][AM2][0] = 1.2
+
+    for case(&ct,I4,I4L) wmat[E2][ct][AM2][0] = 1.3
+
+    wmat[I4][E2][GA][0] = (1.75 + (.43+1)/2)/2
+    wmat[I4L][E2][GA2][0] = (1.75 + (.43+1)/2)/2
+
+    for case(&ct,I2,I2L) wmat[I2][ct][GA][0] = (2 + .7 + .8 + 1.3)/4
+    for case(&ct,I2,I2L) wmat[I2L][ct][GA2][0] = (2 + .7 + .8 + 1.3)/4
+
+    for case(&ct,I4,I4L) wmat[I4][ct][GA][0] = (.4+2.7)/2
+    for case(&ct,I4,I4L) wmat[I4L][ct][GA2][0] = (.4+2.7)/2
+
+    for case(&ct,I5,I5L) wmat[I5][ct][GA][0] = (.4+2.7)/2
+    for case(&ct,I5,I5L) wmat[I5L][ct][GA2][0] = (.4+2.7)/2
+
+    for case(&ct,I2,I2L) wmat[I4][ct][GA][0] = (.4+2.7)/2
+    for case(&ct,I2,I2L) wmat[I4L][ct][GA2][0] = (.4+2.7)/2
+
+    // for L6, no data from that paper, so guessing & using KMJ values -- appear similar range here
+    wmat[E6][E5B][AM2][0]=0.53
+    wmat[E6][E5R][AM2][0]=0.08
+    wmat[E6][E6][AM2][0]=0.53
+    wmat[E6][I6L][AM2][0]=0.23
+    wmat[E6][I6][AM2][0]=0.23
+
+    wmat[I6L][E2][GA2][0]=0.83
+    wmat[I6L][E5B][GA2][0]=0.83
+    wmat[I6L][E5R][GA2][0]=0.83
+    wmat[I6L][E6][GA2][0]=0.83
+
+    wmat[I6L][I2][GA2][0]=0.83
+    wmat[I6L][I5][GA2][0]=0.83
+    wmat[I6L][I6L][GA2][0]=1.5
+    wmat[I6L][I6][GA2][0]=1.5    
+
+    wmat[I6][E6][GA][0]=1.5
+    wmat[I6][I6L][GA][0]=1.5
+    wmat[I6][I6][GA][0]=1.5
+
+  } else {
+    fc = 1
+    //*** neocx -> neocx
+    wmat[E2][E2][AM2][0]=0.78
+    wmat[E2][E2][AM2][1]=0.47 * EEGainInterC
+    wmat[E2][E4][AM2][0]=0.36
+    wmat[E2][E5B][AM2][0]=0.36 * fc
+    wmat[E2][E5R][AM2][0]=0.93 * fc
+    wmat[E2][E6][AM2][0]=0
+    wmat[E2][I2L][AM2][0]=0.23
+    
+    wmat[E2][I2][AM2][0] = 0.23
+    wmat[E2][I2][AM2][1] = 1.5 * EIGainInterC
+
+    wmat[E4][E2][AM2][0]=0.58 * fc
+    wmat[E4][E4][AM2][0]=0.95
+    wmat[E4][E5B][AM2][0]=1.01
+    wmat[E4][E5R][AM2][0]=0.54
+    wmat[E4][E6][AM2][0]=2.27
+    wmat[E4][I4L][AM2][0]=0.23
+    
+    wmat[E4][I4][AM2][0] = 0.23
+    wmat[E4][I4][AM2][1] = 1.5 * EIGainInterC
+    
+    wmat[E5B][E2][AM2][0]=0.26
+    wmat[E5B][E2][AM2][1]=0.47 * EEGainInterC
+    wmat[E5B][E2][AM2][2]=0.47 * EEGainInterC
+    wmat[E5B][E4][AM2][0]=0.17
+    wmat[E5B][E5B][AM2][0]=0.71
+    wmat[E5B][E5B][AM2][1]=0.47 * EEGainInterC
+    wmat[E5B][E5B][AM2][2]=0.47 * EEGainInterC
+    wmat[E5B][E5R][AM2][0]=0.24
+    wmat[E5B][E5R][AM2][1]=0.47 * EEGainInterC
+    wmat[E5B][E5R][AM2][2]=0.47 * EEGainInterC
+    wmat[E5B][E6][AM2][0]=0.49
+    
+    wmat[E5B][I2L][AM2][1]=1.5 * EIGainInterC
+    wmat[E5B][I2L][AM2][2]=1.5 * EIGainInterC
+    
+    wmat[E5B][I5L][AM2][0]=0.23
+    wmat[E5B][I5L][AM2][1]=1.5 * EIGainInterC
+    wmat[E5B][I5L][AM2][2]=1.5 * EIGainInterC
+    
+    wmat[E5B][I5][AM2][0]=0.23
+    wmat[E5B][I5][AM2][1]=1.5 * EIGainInterC
+    wmat[E5B][I5][AM2][2]=1.5 * EIGainInterC
+    
+    wmat[E5R][E2][AM2][0]=0.67
+    wmat[E5R][E4][AM2][0]=0.48
+    wmat[E5R][E5B][AM2][0]=0.88
+    wmat[E5R][E5B][AM2][1]=0.47 * EEGainInterC
+    wmat[E5R][E5R][AM2][0]=0.66
+    wmat[E5R][E5R][AM2][1]=0.47 * EEGainInterC
+    wmat[E5R][E6][AM2][0]=0.28 * fc
+    wmat[E5R][I5L][AM2][0]=0.23
+    wmat[E5R][I5][AM2][0]=0.23
+    wmat[E5R][I5][AM2][1]=1.5 * EIGainInterC
+    
+    wmat[E6][E2][AM2][0]=0
+    wmat[E6][E4][AM2][0]=0
+    wmat[E6][E5B][AM2][0]=0.53
+    wmat[E6][E5R][AM2][0]=0.08
+    wmat[E6][E6][AM2][0]=0.53
+    wmat[E6][I6L][AM2][0]=0.23
+    wmat[E6][I6][AM2][0]=0.23
+    wmat[E6][I6][AM2][1]=1.5 * EIGainInterC
+    
+    wmat[I2L][E2][GA2][0]=0.83
+    wmat[I2L][E5B][GA2][0]=0.83
+    wmat[I2L][E5R][GA2][0]=0.83
+    wmat[I2L][E6][GA2][0]=0.83
+    wmat[I2L][I2L][GA2][0]=1.5
+    wmat[I2L][I2][GA2][0]=1.5
+    wmat[I2L][I5][GA2][0]=0.83
+    wmat[I2L][I6][GA2][0]=0.83
+    
+    wmat[I2][E2][GA][0]=1.5
+    wmat[I2][I2L][GA][0]=1.5
+    wmat[I2][I2][GA][0]=1.5
+    
+    wmat[I4L][E4][GA2][0]=0.83
+    wmat[I4L][I4L][GA2][0]=1.5
+    wmat[I4L][I4][GA2][0]=1.5
+    
+    wmat[I4][E4][GA][0]=1.5
+    wmat[I4][I4L][GA][0]=1.5
+    wmat[I4][I4][GA][0]=1.5
+    
+    wmat[I5L][E2][GA2][0]=0.83
+    wmat[I5L][E5B][GA2][0]=0.83
+    wmat[I5L][E5R][GA2][0]=0.83
+    wmat[I5L][E6][GA2][0]=0.83
+    wmat[I5L][I2][GA2][0]=0.83
+    wmat[I5L][I5L][GA2][0]=1.5
+    wmat[I5L][I5][GA2][0]=1.5
+    wmat[I5L][I6][GA2][0]=0.83
+    
+    wmat[I5][E5B][GA][0]=1.5
+    wmat[I5][E5R][GA][0]=1.5
+    wmat[I5][I5L][GA][0]=1.5
+    wmat[I5][I5][GA][0]=1.5
+    
+    wmat[I6L][E2][GA2][0]=0.83
+    wmat[I6L][E5B][GA2][0]=0.83
+    wmat[I6L][E5R][GA2][0]=0.83
+    wmat[I6L][E6][GA2][0]=0.83
+    wmat[I6L][I2][GA2][0]=0.83
+    wmat[I6L][I5][GA2][0]=0.83
+    wmat[I6L][I6L][GA2][0]=1.5
+    wmat[I6L][I6][GA2][0]=1.5
+    
+    wmat[I6][E6][GA][0]=1.5
+    wmat[I6][I6L][GA][0]=1.5
+    wmat[I6][I6][GA][0]=1.5
+  }
+    
+  //set NMDA weights
+  for from=0,CTYPi-1 for to=0,CTYPi-1 for c=0,colr wmat[from][to][NM2][c]=NMAMR*wmat[from][to][AM2][c]
+  //gain control
+  for from=0,CTYPi-1 for to=0,CTYPi-1 for sy=AM,GA2 for c=0,colr if(wmat[from][to][sy][c] > 0) {
+    if(ice(from)) {
+      if(ice(to)) {
+        gn = IIGain
+      } else {
+        gn = IEGain
+      }
+      if(IsLTS(from) && !IsLTS(to)) gn *= 0.5
+    } else {
+      if(ice(to)) {
+        gn = EIGain 
+        if(IsLTS(to)) gn *= 0.5
+      } else {
+        gn = EEGain
+        if(sy==NM || sy==NM2) gn *= EENMGain // E->E NMDA gain
+      }
+    }
+    wmat[from][to][sy][c] *= gn 
+  }
+}
+
+//* scalewmat(fctr) - multiply values in wmat by fctr
+proc scalewmat () { local fctr,from,to,sy,c
+  fctr=$1
+  for from=0,CTYPi-1 for to=0,CTYPi-1 {      
+    for sy=0,STYPi-1 for c=0,colr-1 wmat[from][to][sy][c] *= fctr
+  }
+}
+
+// %con (con/pre) = %div (div/post)
+
+//* prune using values in prumat
+proc pruc () { local i,j
+  for i=0,CTYPi-1 for j=0,CTYPi-1{
+      if(div[i][j][0] && numc[i] && numc[j] && prumat[i][j]){
+        printf("Warning: pruning random %.2f%% of %s->%s syns\n",prumat[i][j]*100,CTYP.o(i).s,CTYP.o(j).s)
+        for ixt(i) XO.prune(prumat[i][j],j)
+      }
+  }
+}
+
+//* get sprouting value assuming 0% sprouting == 50% pruning
+func getspr () { local pr
+  pr = $1
+  return ((0.5-pr)/.5)*100
+}
+
+//* turn off pruning
+proc pruoff () { local i,j
+ for i=0,CTYPi-1 for j=0,CTYPi-1 prumat[i][j]=0
+ for i=0,allcells-1 INTF6[i].prune(0)
+}
+
+//* set all entries in pruning matrix to $1
+proc setpru () { local from,to,val
+  val=$1
+  pruoff() // first turn off pruning
+  for from=0,CTYPi-1 for to=0,CTYPi-1 prumat[from][to]=val
+}
+
+//* print prumat
+proc prumatpr () { local i,j
+  for i=0,CTYPi-1 { for j=0,CTYPi-1{
+      printf("%.2f  ",prumat[i][j])
+   }
+   printf("\n")
+  }
+}
+
+//* clear sprmat entries to 0
+proc clrsprmat () { local i,j
+  for i=0,CTYPi for j=0,CTYPi sprmat[i][j]=0
+}
+
+//* unkill/prune all cells
+proc unkp () {
+  for i=0,allcells-1 {
+    ce.o(i).flag("dead",0)
+    ce.o(i).prune(0)
+  }
+}
+
+//* kill cells who's ids are in $o1
+proc dokill () { local id
+  for vtr(&id,$o1) ce.o(id).flag("dead",1)
+}
+
+//* getkillids - gets ids of cells to kill in $o1 but excludes cells that are stim'ed
+//$1=cell type to kill,$2=prct of cells to kill,$o3=vq stim nqs,$4=out vector of kill ids,$5=rnd seed
+func getkillids () { local killcnt,i,j,ct,prct localobj vq,vkid,rd
+  ct=$1 prct=$2 vq=$o3 vkid=$o4 killcnt=int(prct*numc[ct]) vkid.resize(0) j=0 i=ix[ct]
+  rd=new Random() rd.ACG($5)
+  while(j<killcnt){
+    i=rd.discunif(ix[ct],ixe[ct])
+    if(!vq.v[0].contains(i)){
+      j+=1
+      vkid.append(i)
+    }
+    i+=1
+  }
+  return killcnt
+}
+
+//* read .net file
+strdef netfile
+{sp = new NQS() cp = new NQS()}
+
+//* CREATE CELLS
+// %con (con/pre) = %div (div/post)
+n=ty=id=0
+
+//** gethublims(col,hubtype,hubfactor,numhubs,mode) 
+// get a matrix of size CTYPi X CTYPi, specifying div with mat.x(hubtype,othertype)
+// and conv with mat.x(othertype,hubtype)
+// hubtype = type of hub. hubfactor = desired ratio of hub div/conv vs non-hub div/conv
+// numhubs = # of hubs. col = COLUMN for which to set hubs.
+// mode == 0 <-- hub div(conv) is set to hubfactor * original div(conv)
+// mode == 1 <-- hub div(conv) is set so that final hub div = hubfactor * final non_hub div (same for conv)
+//  formula is based on:  m / ((N-H*m) / (C-H)) = F , and then solving for m
+//   m = div for the hubs,  F = desired ratio of final hub div to final non-hub div
+//   N = # of synapses (links),  C = total # of postsynaptic cells (including hubs) , H = # of hubs
+//   similarly done for conv , but replace N with appropriate values
+//   (/u/samn/intfcol/notebook.dol_1:21933)
+obfunc gethublims () { local ct,mode,from,to,lim,nc,nhubs,fctr localobj col,mat
+  {col=$o1 ct=$2 fctr=$3 nhubs=$4 mode=$5 mat=new Matrix(CTYPi,CTYPi)}
+  for to=0,CTYPi-1 if(col.numc[to] && col.div[ct][to]) {
+    {nc=col.numc[to] if(ct==to)nc-=1} // deduct for self-link
+    if(mode==0) {
+      lim = int( 0.5 + col.div[ct][to]*fctr )
+    } else {
+      lim = int( 0.5 + col.div[ct][to]*col.numc[ct]*fctr/(col.numc[ct]-nhubs+fctr*nhubs) )
+    }
+    mat.x(ct,to) = MINxy(lim, nc) // at most div to all postsynaptic cells
+  }
+  for from=0,CTYPi-1 if(col.numc[from] && col.div[from][ct]) {
+    {nc=col.numc[from] if(ct==from)nc-=1} // deduct for self-link
+    if(mode==0) {
+      lim = int( 0.5 + col.conv[from][ct]*fctr )
+    } else {
+      lim = int( 0.5 + col.div[from][ct]*col.numc[from]*fctr/(col.numc[ct]-nhubs+fctr*nhubs) )
+    }
+    mat.x(from,ct) = MAXxy(MINxy(lim, nc),1) // at most conv from all presynaptic cells, but at least 1
+  }
+  return mat
+}
+
+//** addhubs(column,cell-type,numhubs,scaling factor,skipI[,seed,allowz,hubmode,verbose])
+// add hubs to the network by stealing wires from other neurons
+// $o1 == column
+// $2 == cell type of hub
+// $3 == number of hubs to add
+// $4 == scaling factor (should be > 1.0) for conv,div of hub
+// $5 == skip div/conv of I cells
+// $6 == seed - optional
+// $7 == allowz - whether to allow pulling all links from/to another cell
+// $8 == hubmode - which mode to use for gethublims (see above)
+// $9 == verbose - optional
+// function returns a Vector containing the ids of the cells selected as hubs (within column ids)
+obfunc addhubs () { local a,ct,fctr,nhubs,idx,jdx,lseed,hubid,szorig,cursz,preid,poid,lim,skipI,to,from,vrb,changed,allowz,hmode\
+                 localobj col,ce,vin,vout,nq,vd,vc,vdd,vdt,vddt,vpicked,vhubid,vw1,vw2,vsyn,vprob,vsynt,vtmp,vdsz,vcsz,mhlim
+  col=$o1 ct=$2 nhubs=$3 fctr=$4 skipI=$5
+  if(numarg()>5) lseed=$6 else lseed=1234
+  if(numarg()>6) allowz=$7 else allowz=1
+  if(numarg()>7) hmode=$8 else hmode=0
+  if(numarg()>8) vrb=$9 else vrb=0
+  {ce=col.ce hashseed_stats(lseed,lseed,lseed)}
+  a=allocvecs(vin,vout,vd,vc,vdd,vdt,vddt,vpicked,vw1,vw2,vsyn,vprob,vsynt,vtmp,vdsz,vcsz)
+  vrsz(col.allcells,vin,vout,vd,vc,vdd,vdt,vddt,vpicked,vw1,vw2,vsyn,vprob,vsynt,vdsz,vcsz,vtmp)
+  mhlim=gethublims(col,ct,fctr,nhubs,hmode)
+  //vin,vout = input/output markers. vd,vc = div/conv.
+  //vdd div/conv delays, vdt div/conv temp. vddt=div/conv delay temp
+  //vpicked=which cells already picked as hubs
+  vhubid=new Vector()
+  {vhubid.indgen(col.ix[ct],col.ixe[ct],1) vhubid.shuffle() vhubid.resize(nhubs)}
+  if(vrb) vlk(vhubid)
+  for idx=0,vhubid.size-1 vpicked.x(vhubid.x(idx))=1 
+  for idx=0,vhubid.size-1 { hubid=vhubid.x(idx) 
+    if(vrb) printf("hub%d id = %d\n",idx+1,hubid)
+    {ce.o(hubid).getdvi(vd,vdd,vw1,vw2,vprob,vsyn) ce.o(hubid).getconv(vc)}//IDs of post/presynaptic cells
+    {ce.o(hubid).getconv(1.2,vcsz) vdsz.resize(CTYPi) vdsz.fill(0)}//counts of post/pre types
+    for jdx=0,vd.size-1 vdsz.x(ce.o(vd.x(jdx)).type)+=1
+    {vout.fill(0) vin.fill(0)}     //init as 0
+    for jdx=0,vd.size-1 vout.x(vd.x(jdx))=1 //mark current postsynaptic cells
+    for jdx=0,vc.size-1 vin.x(vc.x(jdx))=1  //mark current presynaptic cells
+    for to=0,CTYPi-1 if(col.numc[to] && col.div[ct][to] && (!skipI || !ice(to))) {
+      cursz=szorig=vdsz.x(to) // update divergence
+      if(vrb) print "\torig div -> " , CTYP.o(to).s, " = " , szorig
+      {lim=mhlim.x(ct,to) changed=1}
+      while(cursz<lim && changed==1) { changed=0
+        for(preid=col.ix[ct];preid<=col.ixe[ct] && cursz<lim;preid+=1) {// pick same presynaptic type
+          if(vpicked.x(preid)) continue //dont take from other hubs
+          ce.o(preid).getdvi(vdt,vddt,vw1,vw2,vprob,vsynt) 
+          vtmp.fill(0)
+          for jdx=0,vdt.size-1 vtmp.x(ce.o(vdt.x(jdx)).type)+=1
+          if(!allowz && vtmp.x(to)<=1)continue//dont want to turn div of another cell to 0
+          for jdx=0,vdt.size-1 { poid=vdt.x(jdx) // go thru postsynaptic cells looking for target type            
+            if(ce.o(poid).type==to && poid!=hubid && vout.x(poid)==0) { cursz+=1
+              {vd.append(poid) vdd.append(vddt.x(jdx)) vsyn.append(vsynt.x(jdx))}
+              {vdt.remove(jdx) vddt.remove(jdx) vsynt.remove(jdx)}
+              ce.o(preid).setdvi(vdt,vddt,vsynt,1) // update presynaptic cell
+              vout.x(poid)=changed=1 // this cell synapses on poid
+              break
+            }
+          }
+        }
+      }
+      if(vrb) print "\tnew div -> " , CTYP.o(to).s, " = " , cursz
+    }
+    ce.o(hubid).setdvi(vd,vdd,vsyn,1) // update hub dvi
+    for from=0,CTYPi-1 if(col.numc[from] && col.div[from][ct] && (!skipI || !ice(from))) {
+      cursz=szorig=vcsz.x(from) // update convergence
+      {lim=mhlim.x(from,ct) changed=1}
+      if(vrb) print "\torig conv <- ", CTYP.o(from).s, " = " , szorig
+      while(cursz<lim && changed==1) { changed=0
+        for(preid=col.ix[from];preid<=col.ixe[from]&&cursz<lim;preid+=1) {
+          if(preid==hubid || vin.x(preid)) continue // don't make self or double-connects
+          ce.o(preid).getdvi(vdt,vddt,vw1,vw2,vprob,vsynt)
+          for jdx=0,vdt.size-1{
+            poid = vdt.x(jdx)
+            if(vpicked.x(poid)) continue // don't take wires from other hubs            
+            if(ce.o(poid).type==ct){ ce.o(poid).getconv(1.2,vtmp)
+              if(allowz || vtmp.x(from)>1) { // make sure not to remove all inputs of a type to a cell
+                vdt.x( jdx ) = hubid // reassign input to hub
+                ce.o(preid).setdvi(vdt,vddt,vsynt,1) // reset presynaptic cell's div
+                vin.x( preid ) = changed = 1 // mark input
+                cursz += 1
+                break
+              }
+            }
+          }
+        }
+      }
+      if(vrb) print "\tnew conv <- " , CTYP.o(from).s, " = " , cursz
+    }    
+  }
+  ce.o(0).finishdvir()
+  {dealloc(a) return vhubid}
+}
+
+//* mkcolnqs - make an nqs with current pmat,wmat,delm,deld info for use by a COLUMN for wiring
+// "dist" represents distance between columns: dist==0 for intra-COLUMN setup, dist>0 for INTER-COLUMN setup
+proc mkcolnqs () { local from,to,sy,idx,d localobj froms,tos,sys
+  if(numarg()>0)idx=$1 else idx=0
+  {nqsdel(colnq[idx]) colnq[idx]=new NQS("froms","tos","sys","from","to","sy","w","pij","delm","deld","loc","dist")}
+  colnq[idx].strdec("froms","tos","sys")
+  for from=0,CTYPi-1 { froms=CTYP.o(from)
+    for to=0,CTYPi-1 { tos=CTYP.o(to)
+      for d=0,colr if(pmat[from][to][d]>0) for sy=0,STYPi-1 if(wmat[from][to][sy][d]>0) { sys=STYP.o(sy)
+        colnq[idx].append(froms.s,tos.s,sys.s,from,to,sy,wmat[from][to][sy][d],pmat[from][to][d],delm[from][to],deld[from][to],synloc[from][to],d)
+      }
+    }
+  }
+}
+
+//* mkcols - make the COLUMNs
+proc mkcols () { local id,x,y,seed localobj nq
+  id=0
+  for y=0,colH-1 for x=0,colW-1 {
+    if(dbgcols)seed=dvseed else seed=(id+1)*dvseed
+    lcol.append(gcol[y][x]=new COLUMN(id,vcpercol,colnq,seed,x,y,setdviPT,mknetnqss,1))
+    col[id]=gcol[y][x]
+    col[id].verbose=verbose_INTF6
+    //if(strlen(wnqstr)>0) { // strlen is an undefined function in this particular model
+    //  nq=new NQS(wnqstr)
+    //  col[id].wirenq(nq)
+    //  nqsdel(nq)
+    //} else if(swire>0) {
+    if(swire>0) {
+      col[id].setcellpos(vlayerz,layerzvar,pseed*(id+1),colside)
+      if(swire==1) {
+        col[id].swire(col[id].wseed,maxsfall)
+      } else if(swire==3) {
+        swirecutfl(col[id],EEsq,EIsq,IEsq,IIsq,col[id].wseed,slambda) // uses intf6::floc for speedup
+      }
+    } else col[id].wire(col[id].wseed)
+    id+=1
+  }
+}
+
+//* wirecols - setup inter-COLUMN connectivity with NetCon
+proc wirecols () { local x1,y1,x2,y2,dx,dy,maxd,d localobj fromc,toc
+  if(numarg()>0) d=$1 else d=colr
+  if(torus) { // wraparound
+    //alternate coordinates: ( -colW+x   ,  -colH+y )
+    //alternate system: -5  -4  -3  -2  -1
+    //original system:   0   1   2   3   4
+    //layed out as a line: -5  -4  -3  -2  -1  0   1   2   3   4
+    //only need to compare in normal system, and 1 alternate coordinate vs original (and vice versa)
+    for y1=0,colH-1 for x1=0,colW-1 for y2=0,colH-1 for x2=0,colW-1 {
+      if(y1==y2 && x1==x2) continue // skip self-self    
+      dx=MINxy(abs(x1-x2), MINxy(abs((-colW+x1)-x2), abs(x1-(-colW+x2))) )
+      dy=MINxy(abs(y1-y2), MINxy(abs((-colH+y1)-y2), abs(y1-(-colH+y2))) )
+      if((maxd=MAXxy(dx,dy)) > d) continue // skip too far
+      gcol[y1][x1].wire2col(gcol[y2][x2],colnq,maxd,ncl) // unidirectional wiring
+    }
+  } else { // no wrap-around
+    for y1=0,colH-1 for x1=0,colW-1 for y2=0,colH-1 for x2=0,colW-1 {
+      if(y1==y2 && x1==x2) continue // skip self-self    
+      if((maxd=MAXxy(abs(x1-x2),abs(y1-y2))) > d) continue // skip too far
+      gcol[y1][x1].wire2col(gcol[y2][x2],colnq,maxd,ncl) // unidirectional wiring
+    }
+  }
+}
+
+//* intercoloff - turn off all weights between COLUMNs
+proc intercoloff () { local i localobj xo
+  for ltr(xo,ncl) if(isojt(xo.pre,col.ce.o(0)) && isojt(xo.syn,col.ce.o(0))) {
+    for i=0,6 xo.weight(i)=0
+  }
+}
+
+//* intercolmul(from,to,sy,w)
+proc intercolsyw () { local from,to,sy,w localobj xo
+  from=$1 to=$2 sy=$3 w=$4
+  for ltr(xo,ncl) if(isojt(xo.pre,col.ce.o(0)) && isojt(xo.syn,col.ce.o(0))) {
+    if(xo.pre.type==from && xo.syn.type==to) xo.weight(sy)=w
+  }
+}
+
+//* conprob
+func conprob () { // calculate connection probability using global slambda and hval
+  if ($1<=slambda) return hval else return hval*exp(1-$1/slambda) // probability of connect
+}
+
+//** swirecutfl (col,EEsq,EIsq,IEsq,IIsq[,seed,slambda]) - spatial wiring: wires the column using pmat and cell positions
+//                   (wiring probability effected by distance btwn cells)
+// seed is random # seed
+// slambda specifies length-constant for spatially-dependent fall-off in wiring probability
+// at one slambda away, probability of connect is value in pmat
+proc swirecutfl () { local x,y,z,ii,jj,a,del,prid,poid,prty,poty,dv,lseed,h,prob,slambda,dsq,dist,slambdasq,\
+                  EEsq,EIsq,IEsq,IIsq,ic1,ic2,pdx,n,nn,maxd,rsz\
+               localobj col,ce,vidx,vdel,vdist,vwt1,vwt2,vtmp,vpre,opr,opo,st,rdm,vprob,oq,ol,mmaxd
+  oq=new NQS("id1","id2","del","dist","wt1","wt2","dist0","prob") oq.verbose=0 ol=new List() mmaxd=new Matrix(2,2)
+  a=allocvecs(vidx,vdel,vtmp,vdist,vwt1,vwt2,vprob,vpre) z=0
+  {ol.append(vpre) ol.append(vidx) ol.append(vdel) ol.append(vdist) ol.append(vwt1) ol.append(vwt2)}
+  col=$o1 ce=col.ce EEsq=$2 EIsq=$3 IEsq=$4 IIsq=$5
+  if (argtype(6)==0) lseed=$6 else lseed=1234  
+  if(numarg()>6) slambda=$7 else slambda=10
+  if(slambda<=0){
+    printf("swirecut WARN: invalid slambda=%g, setting slambda to %g\n",colside/3)
+    slambda=colside/3
+  }
+  slambdasq = slambda^2 // using squared distance
+  vrsz(1e4,vidx,vdel,vdist,vtmp,vpre)
+  rdm=new Random() rdm.ACG(lseed) // initdivrnd(lseed)//initialize random # generator
+  rdm.uniform(0,1) rsz=ce.count^2 vprob.resize(rsz) vprob.setrand(rdm) pdx=0
+  {mmaxd.x(0,0)=sqrt(EEsq) mmaxd.x(0,1)=sqrt(EIsq) mmaxd.x(1,0)=sqrt(IEsq) mmaxd.x(1,1)=sqrt(IIsq)}
+  // Create the connectivity NQS table.
+  if(col.mknetnqss) {nqsdel(col.connsnq) col.connsnq=new NQS("id1","id2","del","dist","wt1","wt2")}
+  for y=0,ce.count-1 { opr=ce.o(y)
+    vrsz(0,vidx,vdel,vdist,vwt1,vwt2)
+    prid=opr.id prty=opr.type ic1=ice(opr.type)
+    for poty=0,CTYPi-1 if (col.numc[poty]!=0 && (h=hval=col.pmat[prty][poty])>0) {
+      ic2 = ice(poty)
+      oq.clear()
+      if ((n=opr.floc(opr.xloc,opr.yloc,1e9,oq.getcol("id2"),oq.getcol("dist"),mmaxd.x(ic1,ic2),poty))==0) {
+        if(verbose) printf("swirecutfl: No possibilities for connections found from %d\n",opr.id)
+      } else {
+        oq.getcol("dist0").copy(oq.getcol("dist"))
+        oq.pad(n)
+        oq.getcol("dist0").apply("conprob") // turn distances into probabilities
+        if (pdx+n>=rsz) { rdm.uniform(0,1) vprob.setrand(rdm) pdx=0 }
+        oq.getcol("prob").copy(vprob,pdx,pdx+n-1)  // pick out some random probabilities to compare to
+        pdx+=n 
+        oq.calc("<dist0>.sub(<prob>)") 
+        if ((nn=oq.select("dist0",">",0,"id2","!=",prid))==0) { // looks for dist_prob > prob
+          if(verbose) printf("swirecutfl: No connections found from %d out of %d assayed\n",opr.id,n)
+        } else {
+          oq.cpout()
+          //oq.fill("id1",prid)
+          rdm.uniform(col.delm[prty][poty]-col.deld[prty][poty],col.delm[prty][poty]+col.deld[prty][poty])
+          oq.getcol("del").setrand(rdm)
+          if (col.syty1[prty][poty]>=0) oq.getcol("wt1").fill(col.wmat[prty][poty][col.syty1[prty][poty]]) else oq.getcol("wt1").fill(0)
+          if (col.syty2[prty][poty]>=0) oq.getcol("wt2").fill(col.wmat[prty][poty][col.syty2[prty][poty]]) else oq.getcol("wt2").fill(0)
+          {vwt1.append(oq.getcol("wt1")) vwt2.append(oq.getcol("wt2"))}
+          {vidx.append(oq.getcol("id2")) vdel.append(oq.getcol("del"))}
+          vdist.resize(vdist.size+nn)
+          if(synloc[prty][poty]==DEND) vdist.fill(1,vdist.size-nn,vdist.size-1) else vdist.fill(0,vdist.size-nn,vdist.size-1)
+        }
+      }
+    }
+    if(vidx.size>0) {
+      if(wsetting_INTF6==1) opr.setdvi(vidx,vdel,vdist,1,vwt1,vwt2) else opr.setdvi(vidx,vdel,vdist,1)
+      if(col.mknetnqss){vpre.resize(vidx.size) vpre.fill(prid) col.connsnq.append(ol)}
+//        for ii=0,vidx.size-1 col.connsnq.append(prid,vidx.x(ii),vdel.x(ii),vdist.x(ii),vwt1.x(ii),vwt2.x(ii))
+    }
+  }
+  col.ce.o(0).finishdvir()
+  dealloc(a)
+  nqsdel(oq)
+  if(verbose) printf("\n")
+}
+
+//* randsywts(col) - randomize synaptic weights
+proc randsywts () { local w,i,j,k,sy,sead,a localobj xo,vidx,vw1,vw2,col,ce,rdm
+  col=$o1 ce=col.ce
+  if(numarg()>1) sead=$2 else sead=1234
+  rdm=new Random() rdm.ACG(sead)
+  a=allocvecs(vidx,vw1,vw2)
+  for ltr(xo,ce) {
+    {vrsz(xo.getdvi(vidx),vw1,vw2) vw1.fill(0) vw2.fill(0)}
+    for vtr(&i,vidx,&j) {
+      if(synloc[xo.type][ce.o(i).type]==DEND) {
+        if(ice(xo.type)) sy=GA2 else sy=AM2
+      } else {
+        if(ice(xo.type)) sy=GA else sy=AM
+      }
+      w = wmat[xo.type][ce.o(i).type][sy+0][0]
+      if(randsy > 0) {
+        vw1.x(j)=MAXxy(0,rdm.uniform((1-randsy)*w,(1+randsy)*w))
+      } else vw1.x(j)=MAXxy(0,rdm.normal(w,w/(-randsy)))
+      if((w=wmat[xo.type][ce.o(i).type][sy+1][0])>0)vw2.x(j)=vw1.x(j)*NMAMR// only NM2 for wt2
+    }
+    xo.setsywv(vw1,vw2)
+  }
+  dealloc(a)
+}
+
+//* drcelllocs - draw location of cells
+proc drcelllocs () { local i,gvt,ty
+  gvt=gvmarkflag
+  {gvmarkflag=1 col[CDX].cellsnq.marksym="O"}
+  if(numarg()>0) {
+    if(col[CDX].cellsnq.select("ty",$1)) col[CDX].cellsnq.gr("yloc","xloc",0,1,3)
+  } else for i=0,1 if(col[CDX].cellsnq.select("ice",i)) col[CDX].cellsnq.gr("yloc","xloc",0,i+2,3)
+  gvmarkflag=gvt
+}
+
+//* drcelldiv(cellid) - draw outputs from a cell
+proc drcelldiv () { local id1,id2,x1,y1,x2,y2,ic1,ic2,clr1,clr2,gvt localobj cnq,nq
+  gvt=gvmarkflag gvmarkflag=1
+  cnq=col[CDX].connsnq
+  nq=col[CDX].cellsnq
+  id1=$1 nq.verbose=0
+  nq.select(-1,"id",id1)
+  x1=nq.v[5].x(nq.ind.x(0))
+  y1=nq.v[6].x(nq.ind.x(0))
+  ic1=nq.v[4].x(nq.ind.x(0))
+  if(ic1) clr1=3 else clr1=2
+  nq.select("id",id1)
+  nq.gr("yloc","xloc",0,clr1,15)
+  cnq.select(-1,"id1",id1)
+  cnq.verbose=0
+  for vtr(&i,cnq.ind) {
+    id2 = cnq.v[1].x(i)
+    if(nq.select("id",id2)) {
+      x2=nq.fetch("xloc")
+      y2=nq.fetch("yloc")
+      ic2=nq.fetch("ice")
+      if(ic2) clr2=3 else clr2=2
+      nq.gr("yloc","xloc",0,clr2,8)    
+      drline(x1,y1,x2,y2,g,clr1,7)
+    }
+  }
+  cnq.verbose=nq.verbose=1
+  gvmarkflag=gvt
+}
+
+//* drcellconv(cellid) - draw inputs to a cell
+proc drcellconv () { local id1,id2,x1,y1,x2,y2,ic1,ic2,clr1,clr2,gvt localobj cnq,nq
+  gvt=gvmarkflag gvmarkflag=1
+  cnq=col[CDX].connsnq
+  nq=col[CDX].cellsnq
+  id2=$1 nq.verbose=0
+  nq.select(-1,"id",id2)
+  x2=nq.v[5].x(nq.ind.x(0))
+  y2=nq.v[6].x(nq.ind.x(0))
+  ic2=nq.v[4].x(nq.ind.x(0))
+  if(ic2) clr2=3 else clr2=2
+  nq.select("id",id2)
+  nq.gr("yloc","xloc",0,clr2,15)
+  cnq.select(-1,"id2",id2) 
+  cnq.verbose=0
+  for vtr(&i,cnq.ind) {
+    id1 = cnq.v[0].x(i)
+    if(nq.select("id",id1)) {
+      x1=nq.fetch("xloc")
+      y1=nq.fetch("yloc")
+      ic1=nq.fetch("ice")
+      if(ic1) clr1=3 else clr1=2
+      nq.gr("yloc","xloc",0,clr1,8)    
+      drline(x1,y1,x2,y2,g,clr1,7)
+    }
+  }
+  cnq.verbose=nq.verbose=1
+  gvmarkflag=gvt
+}
+
+//* mkwgnq(col) - return nqs with weight info
+obfunc mkwgnq () { local a,i,j,id1,id2,wg,ic,ty1,ty2,wt1,wt2,del,dist\
+                localobj mycel,vwt1,vwt2,myv,myv1,myv2,myv3,myv4,myv5,myv6,wgnq,col
+  a=allocvecs(vwt1,vwt2,myv,myv1,myv2,myv3,myv4,myv5,myv6) col=$o1
+  {nqsdel(wgnq) wgnq=new NQS("id1","id2","wg","ice","ty1","ty2","wt1","wt2","del","dist")}
+  for i=0,col.allcells-1 {
+    mycel=col.ce.o(i)
+    mycel.getdvi(myv,myv1,myv2,myv3,myv4,myv5,myv6)
+    id1=i
+    ic=ice(mycel.type)
+    ty1=mycel.type
+    {vrsz(mycel.getdvi,vwt1,vwt2) vwt1.fill(0) vwt2.fill(0)}
+    if(wsetting_INTF6==1) mycel.getsywv(vwt1,vwt2)
+    for j=0,myv6.size-1 {
+      id2=myv.x(j)
+      ty2=col.ce.o(id2).type
+      wg = myv6.x(j)
+      wt1 = wg * vwt1.x(j)
+      if(ic) wt2 = vwt2.x(j) else wt2 = wg * vwt2.x(j)
+      del = myv1.x(j)
+      dist = myv5.x(j)
+      wgnq.append(id1,id2,wg,ic,ty1,ty2,wt1,wt2,del,dist)
+    }
+  }
+  dealloc(a)
+  return wgnq
+}
+
+//* function calls to setup network
+
+//** # of cells per column
+setcpercol() //new numbers (10aug30)
+
+//** setup pmat
+if(name_declared("nqpmat")==2) { // read pmat from NQS if available, else set to default
+  if(nqpmat!=nil) nq2pmat(nqpmat) else setpmat()
+} else setpmat()
+scalepmat(pmatscale,pmatEE,pmatEI,pmatIE,pmatII)
+
+//** setup synapse locations,delays,wmat
+setsynloc()
+setdelmats()
+setwmat() // new KMJ version
+if(wmatscale!=1) scalewmat(wmatscale)
+
+scrsz=50*1e3
+double scr[scrsz]
+
+//** make cells, columns, wire columns
+mkcolnqs()
+mkcols()
+wirecols(1)
+if(randsy) randsywts(col,randsy)

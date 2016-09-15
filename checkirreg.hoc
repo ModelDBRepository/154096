@@ -1,0 +1,67 @@
+// $Id: checkirreg.hoc,v 1.2 2011/02/16 16:23:38 samn Exp $
+
+// assumes sim has been run
+// calculates CV,LV using ISI of spikes
+
+skipsnq=0
+initAllMyNQs()
+objref nqi[numcols]
+
+proc mkspkisicvlv () {
+  for CDX=0,numcols-1 {
+    print "col " , CDX
+    nqsdel(nqi[CDX]) nqi[CDX]=IsiNQS()
+  }
+}
+mkspkisicvlv()
+
+objref myv[CTYPi],myv2[2],myv3
+objref nqiv[numcols][STYPi]
+
+proc mkinputisicvlv () { local i
+  for CDX=0,numcols-1 {
+    print "col " , CDX
+    for case(&i,AM2,NM2,GA2,GA) {
+      print STYP.o(i).s
+      {nqsdel(nqiv[CDX][i]) nqiv[CDX][i]=VQIsiNQS(vq,i)}
+      addCVcol(nqiv[CDX][i])
+      addLVcol(nqiv[CDX][i])
+    }
+  }
+}
+
+proc mkavirreg () {
+  for case(&i,E2,I2,I2L,E4,I4,I4L,E5R,E5B,I5,I5L,E6,I6,I6L) myv[i]=new Vector()
+  for i=0,1 myv2[i]=new Vector()
+  myv3=new Vector()
+  clr=1
+  for case(&i,E2,I2,I2L,E4,I4,I4L,E5R,E5B,I5,I5L,E6,I6,I6L) {
+    for j=0,numcols-1 {
+      nqi[j].verbose=0
+      if(nqi[j].select("ty",i)) {
+        myv[i].append(nqi[j].getcol("lv"))
+        myv2[ice(i)].append(nqi[j].getcol("lv"))
+        myv3.append(nqi[j].getcol("lv"))
+      }
+      nqi[j].verbose=1
+    }
+    print CTYP.o(i).s,myv[i].min,myv[i].max,myv[i].mean,myv[i].stderr
+    //  g.color(clr)
+    //  g.label(0.1,0.1,CTYP.o(i).s)
+    //  hist(g,myv[i])
+    clr+=1
+    if(clr>9)clr=1
+  }
+}
+mkavirreg()
+
+if(g==nil) gg()
+
+proc drprav () {
+  for i=0,1 print myv2[i].min,myv2[i].max,myv2[i].mean,myv2[i].stderr
+  ttest(myv2[0],myv2[1]) 
+  for i=0,1 {
+    clr=2+i
+    hist(g,myv2[i])
+  }
+}

@@ -1,0 +1,15 @@
+// $Id: python.hoc,v 1.4 2010/12/10 01:03:08 billl Exp $
+
+objref p
+p = new PythonObject()
+nrnpython("ev = lambda arg : eval(arg)")
+nrnpython("import pylab")
+nrnpython("import scipy")
+nrnpython("import scipy.io")
+// mat = scipy.io.loadmat('file.mat')
+nrnpython("import scipy.signal")
+nrnpython("import math")
+nrnpython("import numpy")
+nrnpython("from neuron import h")
+nrnpython("import sys")
+p.sys.path.append("/usr/site/nrniv/local/python")

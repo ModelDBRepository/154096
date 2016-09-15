@@ -1,0 +1,28 @@
+// $Id: nqpplug.hoc,v 1.6 2011/11/08 22:26:54 samn Exp $ 
+
+
+initAllMyNQs()
+
+objref NQP
+NQP = new NQS("ct","s","nqp","i","pkx","pky")
+NQP.odec("nqp")
+
+for case(&j,-1,CTYPi,CTYPi+1,E4,I4,I4L,E2,I2,I2L,E5R,E5B,I5,I5L) {
+  mk4specs(1,PreDur,\
+           PreDur+1,PreDur+ZipDur-1,\
+           PreDur+ZipDur+1,PreDur+ZipDur+LearnDur-1,\
+           PreDur+ZipDur+LearnDur+1,PreDur+ZipDur+LearnDur+PostDur-1,j)
+  for i=0,3 if(nqp[0][i]!=nil) {
+    pkx = nqp[0][i].v[0].x(nqp[0][i].v[1].max_ind)
+    pky = nqp[0][i].v[1].max
+    NQP.append(j,0,nqp[0][i],i,pkx,pky)
+  }
+  for i=0,3 if(nqps[0][i]!=nil) {
+    pkx = nqps[0][i].v[0].x(nqps[0][i].v[1].max_ind)
+    pky = nqps[0][i].v[1].max
+    NQP.append(j,1,nqps[0][i],i,pkx,pky)
+  }
+}
+
+sprint(tstr,"/u/samn/intfzip/data/%s_NQP_A.nqs",strv)
+NQP.sv(tstr)

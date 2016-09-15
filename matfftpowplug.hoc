@@ -1,0 +1,74 @@
+// $Id: matfftpowplug.hoc,v 1.4 2010/10/07 06:19:50 samn Exp $ 
+
+// "plugin" (for batch.hoc) to do analysis on sim data
+
+binsz = 5 // bin size in ms
+sampr = 1e3 / binsz // sampling rate
+initAllMyNQs() // initialize counts per time, by type, column, etc.
+
+smoothsz = 0 // # of points to smooth with
+
+objref nqf,nqtmp
+objref vintraty[numcols][CTYPi] // each type, within column
+objref vintraE[numcols]         // all Es within column
+objref vintraI[numcols]         // all Is within column
+objref vinterty[CTYPi]          // each type, across columns
+objref vinterE,vinterI          // all Es,Is across columns
+
+sz=nqCTY[0].v[E2].size
+
+proc myrsz () { // util func to call matfftpow and add results to nqf
+  {vec.resize(0) vec.copy($o1) vec.sub(vec.mean)}
+  nqtmp=matfftpow(vec,sampr,sampr/2,0,0,smoothsz)
+  {nqf.resize($s2) nqf.v[nqf.m-1].copy(nqtmp.getcol("pow"))}
+  nqsdel(nqtmp)
+}
+
+//for case(&smoothsz,50,sampr) {
+
+  nqf=new NQS()
+
+  {vinterE=new Vector(sz) vinterI=new Vector(sz)}
+  for i=0,CTYPi-1 if(col.numc[i]) vinterty[i]=new Vector(sz)
+  for i = 0 , numcols - 1 { // setup all the vectors that will have matfftpow run on them
+    {vintraE[i]=new Vector(sz)  vintraI[i]=new Vector(sz)}
+    for j = 0, CTYPi - 1 {
+      if(nqCTY[i].v[j].size>0) {
+
+        vintraty[i][j]=new Vector(sz)
+        vintraty[i][j].copy(nqCTY[i].v[j])
+      
+        vinterty[j].add(nqCTY[i].v[j])
+
+        if(ice(j)) {
+          vintraI[i].add(nqCTY[i].v[j])
+          vinterI.add(nqCTY[i].v[j])
+        } else {
+          vintraE[i].add(nqCTY[i].v[j])
+          vinterE.add(nqCTY[i].v[j])
+        }
+      }
+    }
+  }
+
+  {vec.resize(0) vec.copy(vinterE) vec.sub(vec.mean)}
+  nqtmp=matfftpow(vec,sampr,sampr/2,0,0,smoothsz)
+  {nqf.resize("f") nqf.v[nqf.m-1].copy(nqtmp.getcol("f"))}
+  {nqf.resize("interE") nqf.v[nqf.m-1].copy(nqtmp.getcol("pow")) nqsdel(nqtmp)}
+  
+  myrsz(vinterI,"interI")
+  
+//  for i=0,CTYPi-1 if(vinterty[i]!=nil) {sprint(tstr,"inter%s",CTYP.o(i).s) myrsz(vinterty[i],tstr)}
+
+  for i=0,numcols-1 {
+    {sprint(tstr,"C%dintraE",i) myrsz(vintraE[i],tstr)}
+    {sprint(tstr,"C%dintraI",i) myrsz(vintraI[i],tstr)}
+    for j=0,CTYPi-1 if(vintraty[i][j]!=nil && (j==E2 || j==I2)) {
+      if(vintraty[i][j].size>0) {sprint(tstr,"C%dintra%s",i,CTYP.o(j).s) myrsz(vintraty[i][j],tstr)}
+    }
+  }
+
+  sprint(tstr,"/u/samn/intfcol/data/%s_nqpmtmpow_A.nqs",strv)
+  nqf.sv(tstr)
+  nqsdel(nqf)
+//}

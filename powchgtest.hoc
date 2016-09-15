@@ -1,0 +1,103 @@
+// $Id: powchgtest.hoc,v 1.11 2010/10/10 23:18:02 samn Exp $ 
+
+
+// make an nqs that has changes in power spectra as a function of hubs - uses data from batch.hoc60,62,63
+// and relies on load.hoc87
+
+newbatch=1
+rcsopen("load.hoc",87)
+
+declare("nqforig","o[2]")
+nqforig=new NQS("/u/samn/intfcol/data/10oct10.10sep25.02_ISEED_1234_DVSEED_534023_SIMTYP_0_DISCONCOL_1__nqpmtm_E_I_MINUS_ALL_HUB_TYPES_B.nqs")
+nqforig[1]=new NQS("/u/samn/intfcol/data/10sep25.02_ISEED_1234_DVSEED_534023_SIMTYP_0_DISCONCOL_1__nqpmtmpow_A.nqs")
+
+objref vav[2][3][CTYPi],vev[2][3][CTYPi],vnhubs,vty,vf1,vf2//indices into vav,vev same meaning as into dbase
+{vnhubs=new Vector() vnhubs.indgen(1,10,1)}
+{vty=new Vector() vty.append(E2,I2,E4,I4,E5R,E5B,I5,E6,I6)}
+{vf1=new Vector() vf1.append(4,12,30) vf2=new Vector() vf2.append(12,30,100)}
+objref lop1,lop2,le
+{lop1=new List() lop1.append(new String(">=")) lop1.append(new String(">")) lop1.append(new String(">="))}
+{lop2=new List() lop2.append(new String("<=")) lop2.append(new String("<")) lop2.append(new String("<="))}
+{le=new List() le.append(new String("E")) le.append(new String("I"))}
+
+//dbase stores baseline level of power for each column, in theta, beta, gamma bands
+double dbase[numcols][CTYPi][vf1.size] // 3rd dim = 0:theta,1:beta,2:gamma, 3rd dim = column 
+
+for i=0,8 { // store the baseline values in dbase
+  for vtr(&j,vty) { ic=ice(j)
+    for k=0,2 { 
+      {f1=vf1.x(k)  f2=vf2.x(k)}
+      if(ic) {
+        sprint(tstr,"C%dintraE",i)
+      } else {
+        sprint(tstr,"C%dintra%sMINUS%s",i,le.o(ic).s,CTYP.o(j).s)
+      }
+      if(!nqforig[ic].select("f",lop1.o(k).s,f1,"f",lop2.o(k).s,f2)) print "PROB!!!!!!!!!!!!!!!!!!!!!!"
+      dbase[i][j][k]=nqforig[ic].getcol(tstr).sum
+    }
+  }
+}
+
+objref nqchg // nqs stores percent changes from baseline after alterations
+nqchg=new NQS("ty","nhubs","col","pchange","minf","maxf")
+for i=0,nqbatch.v.size-1 {
+  nq=nqbatch.get("nqpmtm",i).o
+  SIMTYP=nqbatch.get("SIMTYP",i).x
+  NHUBS=nqbatch.get("NHUBS",i).x
+  ic=ice(SIMTYP)
+  for j=0,numcols-1 {
+    if(ic) sprint(tstr,"C%dintraE",j) else sprint(tstr,"C%dintraEMINUS",j)
+    for k=0,2 {
+      {f1=vf1.x(k) f2=vf2.x(k)}
+      if(!nq.select("f",lop1.o(k).s,f1,"f",lop2.o(k).s,f2)) print "BORP!!!!!!!!!!!!!!!!!!!!!!!!!"
+      pchg = 100.0 * (nq.getcol(tstr).sum - dbase[j][SIMTYP][k]) / dbase[j][SIMTYP][k]
+      nqchg.append(SIMTYP,NHUBS,j,pchg,f1,f2)
+    }
+  }  
+}
+
+//* mkavgerr - setup avg+/-stderr
+proc mkavgerr () { local i,j,k,ic,fidx,f1,f2
+  for vtr(&i,vty) { 
+    ic=ice(i)
+    for j=0,2{vav[ic][j][i]=new Vector() vev[ic][j][i]=new Vector() vav[ic][j][i].label(CTYP.o(i).s)}
+  }
+  for fidx=0,2 {
+    f1=vf1.x(fidx) f2=vf2.x(fidx)
+    for vtr(&i,vty) { ic=ice(i)
+      for j=1,10 {
+        if(!nqchg.select("ty",i,"minf",f1,"maxf",f2,"nhubs",j)) {
+          print "didn't find ", CTYP.o(i).s, " minf ", f1, " maxf " , f2 , " nhubs " , j
+        }
+        vav[ic][fidx][i].append(nqchg.getcol("pchange").mean)
+        vev[ic][fidx][i].append(nqchg.getcol("pchange").stderr)
+      }
+    }
+  }
+}
+mkavgerr()
+//* drit(
+proc drit () { local f1,f2,i,j,k,fidx,ic
+  fidx=$1 f1=vf1.x(fidx) f2=vf2.x(fidx)
+  ic=$2 j=0
+  for vtr(&i,vty) if( (ic && ice(i)) || (!ic && !ice(i)) ) {
+    g.color(j+1)
+    vav[ic][fidx][i].mark(g,vnhubs,"O",12,j+1,1)
+    vav[ic][fidx][i].ploterr(g,vnhubs,vev[ic][fidx][i],5,j+1,4)
+    if(ic) {
+      vav[ic][fidx][i].plot(g,vnhubs,j+1,1)
+    }
+    j+=1
+  }
+}
+//* prit - print out stats
+proc prit () { local i,j,fidx,f1,f2
+  nqchg.verbose=0
+  for fidx=0,2 {
+    {f1=vf1.x(fidx) f2=vf2.x(fidx)}
+    for vtr(&i,vty) for j=1,10 if(nqchg.select("ty",i,"nhubs",j,"minf",f1,"maxf",f2)) {
+      print CTYP.o(i).s," ",j," hubs, ",f1," - ",f2," Hz : ",nqchg.getcol("pchange").mean,"+/-",nqchg.getcol("pchange").stderr
+    }
+  }
+  nqchg.verbose=1
+}

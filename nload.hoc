@@ -1,0 +1,1233 @@
+// $Id: nload.hoc,v 1.203 2012/01/20 02:50:20 samn Exp $ 
+
+strdef strvecs,strnclnq //vecs file, vq nqs file, nqin nqs file, nqfld nqs file
+strdef strv
+strv="09apr17.18"
+sprint(tstr,"o[%d]",numcols)
+declare("nqtt",tstr,"nqte",tstr,"nqtea",tstr,"nqktau",tstr,"nclnq",tstr,"vLFP",tstr,"glfp","o[1]")
+declare("vspudx",new Vector(),"vspudy",new Vector())
+declare("nqCO",tstr,"nqisi",tstr,"nqCTY",tstr)
+declare("startt",0)
+if(name_declared("snq")) {
+  nqsdel(snq)
+  objref snq[numcols]
+} else declare("snq",tstr)
+if(name_declared("fnq")) {
+  nqsdel(fnq)
+  objref fnq[numcols]
+} else declare("fnq",tstr)
+if(name_declared("vq")) {
+  nqsdel(vq)
+  objref vq[numcols]
+} else declare("vq",tstr)
+declare("CDX",0)
+declare("sparsesnq",0)
+sprint(tstr,"o[%d][10]",numcols)
+declare("nqIN",tstr)
+declare("skipsnq",1) // iff==1 dont get snq and isinq
+declare("binsz",5) //5ms
+{pflg=1 ers=0}
+declare("htmin",0)//sgrdel //min time in histogram
+declare("htmax",mytstop)  //max time in histogram
+for i=0,numcols-1 vq[i]=lcol.o(i).cstim.vq
+
+//* VQIsiNQS(vq,sy) - get an NQS with ISI from external inputs stored in vq
+// only uses synapses type specified by sy
+obfunc VQIsiNQS() { local idx,tt,jdx,sy,a localobj nqisi,vid,vd,vt,vq
+  vq=$o1 sy=$2 a=allocvecs(vid,vd)
+  {nqisi=new NQS("ind","visi") nqisi.odec("visi")}
+  {vq.verbose=nqisi.verbose=0 vq.tog("DB")}
+  vid.resize(vq.v.size) vq.getcol("ind").uniq(vid)
+  for vtr(&idx,vid) if(vq.select("ind",idx,"sy",sy)>2) {
+    vt=vq.getcol("time")
+    vd.resize(0) vd.deriv(vt,1,1)
+    nqisi.append(idx,vd)
+  }
+  {vq.tog("DB") vq.verbose=nqisi.verbose=1 dealloc(a)}
+  return nqisi
+}
+
+//* getLV(visi) -- get LV (local variation)
+func getLV () { local i,j,s,n,d localobj vec
+  vec=$o1 s=0
+  if(vec.size < 2) {printf("getLV ERRA: input vec too small!\n") return 0}
+  for i=0,vec.size-2 {
+    n = (vec.x(i)-vec.x(i+1))^2
+    d = (vec.x(i)+vec.x(i+1))^2
+    s += 3*n/d
+  }
+  return s / (vec.size-1)
+}
+
+//* addCVcol(nqisi) - add column to input NQS with CV -- input NQS has to have a visi objref col
+// containing a Vector of interspike intervals
+proc addCVcol () {  local i,c,m,a localobj nqi,vec
+  a=allocvecs(vec) nqi=$o1 nqi.tog("DB")
+  if((c=nqi.fi("cv")) == -1){ nqi.resize("cv") nqi.pad() c=nqi.m-1}
+  for i=0,nqi.v.size-1 {
+    vec.resize(0) vec.copy(nqi.get("visi",i).o)
+    m=vec.mean()
+    if(m) nqi.v[nqi.m-1].x(i) = vec.stdev / m else nqi.v[nqi.m-1].x(i)=0
+  }
+  dealloc(a)
+}
+
+//* addLVcol(nqisi) - add column to input NQS with LV (local variability of interspike interval) --
+// input NQS has to have a visi objref col containing a Vector of interspike intervals
+// LV is 1 for poisson ISI, 0 for regular
+proc addLVcol () {  local i,c,m,a localobj nqi,vec
+  a=allocvecs(vec) nqi=$o1 nqi.tog("DB")
+  if((c=nqi.fi("lv")) == -1){ nqi.resize("lv") nqi.pad() c=nqi.m-1}
+  for i=0,nqi.v.size-1 {
+    {vec.resize(0) vec.copy(nqi.get("visi",i).o)}
+    nqi.v[nqi.m-1].x(i) = vec.lvar()
+  }
+  dealloc(a)
+}
+
+//* IsiNQS() - makes an NQS with ISI,CV,LV information for each cell, uses globals: CDX,col,snq!!!
+obfunc IsiNQS () { local idx,tt,jdx,a localobj nqisi,vid,vd,vt,vty,vic
+  if(snq[CDX]==nil) mksnq()
+  {nqisi=new NQS("gid","id","type","ice","visi") nqisi.odec("visi")}
+  snq[CDX].verbose=nqisi.verbose=0
+  a=allocvecs(vid,vd)
+  for idx=0,col[CDX].allcells-1 {
+    if(snq[CDX].select("id",idx)>2) {
+      vt=snq[CDX].getcol("t")
+      vty=snq[CDX].getcol("type")
+      vic=snq[CDX].getcol("ice")
+      vd.resize(0) vd.deriv(vt,1,1) // ISI
+      nqisi.append(col[CDX].ce.o(idx).gid,idx,vty.x(0),vic.x(0),vd)
+    }
+  }
+  addCVcol(nqisi) // coefficient of variation
+  addLVcol(nqisi) // local variation
+  snq[CDX].tog("DB")
+  dealloc(a)
+  snq[CDX].verbose=nqisi.verbose=1
+  return nqisi
+}
+
+//* SpikeNQS (time vec, id vec, cell list) returns NQS containing gid,id,type,ice,t<-spike times
+obfunc SpikeNQS (){ local idx,gcol,tycol,icecol,idcol,tcol,colcol localobj vec,tvec,nq,ce,c
+  {tvec=$o1 vec=$o2 ce=$o3.ce}
+  if(sparsesnq) {
+    nq=new NQS("gid","id","t") 
+  } else nq=new NQS("col","gid","id","type","ice","t") 
+  {gcol=nq.fi("gid") tycol=nq.fi("type") icecol=nq.fi("ice") idcol=nq.fi("id") tcol=nq.fi("t") colcol=nq.fi("col")}
+  {nq.v[idcol].copy(vec) nq.v[tcol].copy(tvec) nq.pad()}
+  if(sparsesnq) {
+    for idx=0,vec.size-1 { c=ce.o(vec.x(idx))
+      nq.v[gcol].x(idx)=c.gid()
+    }
+    nq.v[icecol].copy(nq.v[tycol]) nq.v[icecol].apply("ice")
+  } else {
+    for idx=0,vec.size-1 { c=ce.o(vec.x(idx))
+      nq.v[colcol].x(idx)=c.col
+      nq.v[gcol].x(idx)=c.gid()
+      nq.v[tycol].x(idx)=c.type
+    }
+    nq.v[icecol].copy(nq.v[tycol]) nq.v[icecol].apply("ice")
+  }
+  nq.marksym="O"
+  return nq
+}
+
+//* FreqNQS(snq,ce,[,duration])
+//get an NQS with rate of firing of each cell
+//$o1 = spikenqs, $o2 = cell list, $3 = duration (starts from 0)
+obfunc FreqNQS () { local i,a,ns,tt localobj snq,fnq,vi,ce
+  a=allocvecs(vi) fnq=new NQS("col","gid","id","type","ice","freq") snq=$o1 ce=$o2.ce
+  if(numarg()>2) tt=$3 else tt=tstop
+  snq.tog("DB") vi.indgen(0,$o2.allcells-1,1)
+  for vtr(&i,vi) fnq.append(ce.o(i).col,ce.o(i).gid,i,ce.o(i).type,ice(ce.o(i).type),1e3*snq.select(-1,"id",i)/tt)
+  dealloc(a) return fnq
+}
+
+//* clrMyNQs - delete nqCO[CDX], nqIN[CDX]
+proc clrMyNQs () { local i
+  nqsdel(nqCO[CDX])
+  for i=0,9 nqsdel(nqIN[CDX][i])
+  nqsdel(snq[CDX])
+  nqsdel(nqisi[CDX])
+  nqsdel(nqCTY[CDX])
+}
+
+//* rrounddI
+func rrounddI () {
+  return int($1+0.5)
+}
+
+//** getnqlfpcor(nqs with columns as LFP, window size in ms)
+obfunc getnqlfpcor () { local winsz,tt,et,maxt,maxi,i,j,a localobj v0,v1,nqlfp,nqo
+  nqlfp=$o1 a=allocvecs(v0,v1) winsz=$2
+  {maxt=nqlfp.v.size*vdt_INTF6-1e3 maxi=nqlfp.v.size-1 nqo=new NQS("c0","c1","tt","r")}
+  {nqo.v.resize((maxt/winsz)*nqlfp.m*(nqlfp.m-1)/2) nqo.pad() nqo.clear()}
+  for(tt=1e3;tt+winsz<=maxt;tt+=winsz) {
+    {et=MINxy((tt+winsz)/vdt_INTF6,maxi) vrsz(0,v0,v1)}
+    for i=0,nqlfp.m-1 { v0.copy(nqlfp.v[i],tt/vdt_INTF6,et)
+      for j=i+1,nqlfp.m-1 { v1.copy(nqlfp.v[j],tt/vdt_INTF6,et)
+        nqo.append(i,j,tt,v0.pcorrel(v1))
+      }
+    }
+  }
+  {dealloc(a) return nqo}
+}
+
+//** getlfppco(nqs from getnqlfpcor)
+obfunc getlfppco () { local t1,t2,csz,rc,i,j,a localobj mc,v0,v1,nqc
+  {a=allocvecs(v0,v1) nqc=$o1 nqc.tog("DB") nqc.verbose=0}
+  {v0.resize(nqc.v.size) nqc.getcol("c0").uniq(v0)}
+  {csz=(1+v0.size)*(v0.size)/2 rc=nqc.fi("r") vrsz(0,v0,v1)}
+  {mc=new Matrix(nqc.v.size/csz,nqc.v.size/csz) i=j=0}
+  for(t1=0;t1<nqc.v.size;t1+=csz) { v0.copy(nqc.v[rc],t1,t1+csz-1)
+    {mc.x(i,i)=1 j=i+1}
+    for(t2=t1+csz;t2<nqc.v.size;t2+=csz) { v1.copy(nqc.v[rc],t2,t2+csz-1)
+      mc.x(i,j)=mc.x(j,i)=v0.pcorrel(v1)
+      j+=1
+    }
+    i+=1
+  }
+  {nqc.verbose=1 dealloc(a) return mc}
+}
+
+//** gotolfp(nqlfp,nqspud,tmin,tmax,offy)
+func gotolfp () { local a,b,c,i,offy,tmin,tmax localobj nqlfp,nqspud,vtmpx,vtmpy,vsub
+  if(glfp==nil)glfp=new Graph()
+  a=allocvecs(vtmpx,vtmpy,vsub)
+  {nqlfp=$o1 nqspud=$o2 tmin=$3 tmax=$4 offy=$5}
+  if(vLFP==nil) {
+    for i=0,nqlfp.m-1 {
+      vLFP[i]=new Vector()
+      vLFP[i].plot(glfp,vdt_INTF6)
+    }
+  }
+  glfp.erase
+  vsub.resize(nqlfp.m)
+  for i=0,nqlfp.m-1 { // draw lfps
+    {vLFP[i].resize(0) vLFP[i].copy(nqlfp.v[i],tmin/vdt_INTF6,tmax/vdt_INTF6)}
+    {vsub.x(i)=vLFP[i].min vLFP[i].add(offy*i-vsub.x(i)) vLFP[i].line(glfp,vdt_INTF6)}
+  }
+  if(nqspud!=nil) { // draw peak of bumps
+    {nqspud.verbose=0 vrsz(0,vspudx,vspudy)}
+    for i=0,nqlfp.m-1 if(nqspud.select("LOC","[]",tmin,tmax,"COL",i)) {
+      vrsz(0,vtmpx,vtmpy)
+      {vtmpy.copy(nqspud.getcol("PEAK")) vtmpy.add(i*offy-nqlfp.v[i].min)}
+      {vtmpx.copy(nqspud.getcol("LOC")) vtmpx.sub(tmin)}
+      {vspudx.append(vtmpx) vspudy.append(vtmpy)}
+    }
+    vspudy.mark(glfp,vspudx,"O",4,2,1)
+    {nqspud.verbose=1 dealloc(a)}
+  }
+  {dealloc(a) glfp.exec_menu("View = plot")}
+  return 1
+}
+
+//** make a single NQS out of nqLFP, using last full LFP in each
+obfunc getnqlfp () { local i localobj nqlfp 
+  nqlfp=new NQS(numcols)
+  for i=0,numcols-1 nqlfp.v[i].copy(nqLFP[i].v[nqLFP[i].m-1])
+  return nqlfp
+}
+
+//** getnqspud(nqs with columns as LFP)
+obfunc getnqspud () { local i,off,x,a localobj vec,nqu,nqin,nqtmp
+  {a=allocvecs(vec) test_do_graphs=0 nqin=$o1 printStep=vdt_INTF6}
+  if(numarg()>1) off=$2 else off=1e3
+  for i=0,nqin.m-1 {
+    vec.resize(0) vec.copy(nqin.v[i],off/vdt_INTF6,(tstop-off)/vdt_INTF6)
+    nqtmp=testupdown(vec,10,0)
+    {nqtmp.resize("COL") nqtmp.pad() nqtmp.v[nqtmp.m-1].fill(i)}
+    if(nqu==nil) {
+      {nqu=new NQS() nqu.cp(nqtmp)}
+    } else nqu.append(nqtmp)
+    nqsdel(nqtmp)
+  }  
+  for case(&x,0,5) nqu.v[x].add(off) // add offset so have sim times
+  {dealloc(a) return nqu}
+}
+
+//* initnqCTY(col id) - makes an NQS with summed spike-train activity by type, requires nqCO to be setup already
+// nqCO[cid].v[celltype] is summed activity of the given celltype
+proc initnqCTY () { local i,cid,ty
+  {cid=$1 nqsdel(nqCTY[cid]) nqCTY[cid]=new NQS(CTYPi+2)} // last two are all E, all I
+  for i=nqCTY[cid].m-2,nqCTY[cid].m-1 nqCTY[cid].v[i].resize(nqCO[cid].v[0].size)//E,I
+  for i=0,nqCO[cid].m-1 {
+    ty=col[cid].ce.o(i).type
+    if(nqCTY[cid].v[ty].size==0) nqCTY[cid].v[ty].resize(nqCO[cid].v[i].size)
+    nqCTY[cid].v[ty].add(nqCO[cid].v[i])
+    if(ty!=TC && ty!=IRE) nqCTY[cid].v[CTYPi+ice(ty)].add(nqCO[cid].v[i]) // E,I
+  }
+}
+
+//* getnqCTYnt - returns an nqs of nTE between summed counts per type (nqCTY[...]), across/within columns
+obfunc getnqCTYnt () { local i,c1,c2,nt,nshuf,from,to,a localobj nq,vtmp
+  a=allocvecs(vtmp) vtmp.resize(35) nshuf=30
+  {nq=new NQS("col1","col2","fs","ts","from","to","ic1","ic2","nte","samec") nq.strdec("fs") nq.strdec("ts")}
+  for c1=0,numcols-1 for c2=0,numcols-1 {
+    for from=0,CTYPi-1 for to=0,CTYPi-1 {
+      if(from==to && c1==c2) continue
+      if(nqCTY[c1].v[from].size<1 || nqCTY[c2].v[to].size<1) continue
+      nt = nqCTY[c1].v[from].tentropspks(nqCTY[c2].v[to],vtmp,nshuf)
+      nq.append(c1,c2,CTYP.o(from).s,CTYP.o(to).s,from,to,ice(from),ice(to),nt,c1==c2)
+    }
+  }
+  {dealloc(a) return nq}
+}
+
+//* getnTEmap(nqs from getnqCTYnt, col1, col2, type1, type2, map of types to matrix coordinates)
+// returns a matrix where element x,y is nTE from row y -> column x
+obfunc getnTEmap () { local ty1,ty2,c1,c2,cid,from,to localobj mc,vty1,vty2,vm,nq
+  nq=$o1 c1=$2 c2=$3 vty1=$o4 vty2=$o5 vm=$o6 nq.verbose=0
+  mc=new Matrix(vty1.size,vty2.size)
+  for vtr(&from,vty1) for vtr(&to,vty2) if(nq.select("col1",c1,"col2",c2,"from",from,"to",to)) {    
+    mc.x(vm.x(from),vm.x(to)) = MAXxy(nq.fetch("nte"),0)
+  } else mc.x(vm.x(from),vm.x(to))=0
+  nq.verbose=1
+  return mc
+}
+
+//* colnTEmap(nq from getnqCTYnt, list for output matrices,inter flag)
+// gets COLUMN nTE map, uses all cell types and columns
+// returns average of list for output matrices
+// iff inter == 0, then gets INTRA-column map, iff inter == 1, gets INTER-column map
+obfunc colnTEmap () { local i,j,cnt,inter,a localobj mc,vty1,vty2,vm,lc,nq
+  {a=allocvecs(vty1,vty2,vm) vrsz(0,vty1,vty2)}
+  nq=$o1 lc=$o2 if(lc==nil){lc=new List()} inter=$3
+  {vty1.append(E2,I2,I2L,E4,I4,I4L,E5R,E5B,I5,I5L,E6,I6,I6L) vty2.copy(vty1)}
+  {vm.resize(CTYPi) vm.fill(0) cnt=0}
+  for vtr(&i,vty1) {vm.x(i)=cnt cnt+=1} // map cell types to index in Matrix
+  if(inter) {
+    for i=0,numcols-1 for j=0,numcols-1 if(i!=j) lc.append(getnTEmap(nq,i,j,vty1,vty2,vm))
+  } else for i=0,numcols-1 lc.append(getnTEmap(nq,i,i,vty1,vty2,vm))
+  mc=avgmat(lc) // average Matrix
+  {dealloc(a) return mc}
+}
+
+//* mksnq - make snq[CDX] for current col == CDX
+proc mksnq () { localobj xo
+  {nqsdel(snq[CDX]) snq[CDX]=SpikeNQS(vit[CDX].tvec,vit[CDX].vec,lcol.o(CDX))}
+}
+
+//* initMyNQs - init binned value NQSs using raster info from vit[CDX] and input info from vq
+// nqCO[CDX] = nqs with counts/time for each cell
+// nqIN[CDX][sy] = nqs with counts/time for external inputs to synapse type sy @ all the cells
+proc initMyNQs () { local ct,idx,sy,a localobj vidx,vt
+  a=allocvecs(vidx,vt) vq[CDX].verbose=0
+  if(nqCO[CDX]==nil) nqCO[CDX]=new NQS(col[CDX].allcells) else nqCO[CDX].clear() //NQS for the binned spike-trains
+  vit[CDX].vec.ihist(vit[CDX].tvec,nqCO[CDX].vl,htmin,htmax,binsz)
+  for case(&sy,AM,NM,GA,AM2,NM2,GA2) if(vq[CDX].select("sy",sy)) {
+    flag_stats=1 //allow vq[CDX].v[1] to be unsorted  
+    if(nqIN[CDX][sy]==nil) nqIN[CDX][sy]=new NQS(vq[CDX].v[0].max+1) else nqIN[CDX][sy].clear() //NQS for the binned input events
+    {vidx.copy(vq[CDX].getcol("ind")) vt.copy(vq[CDX].getcol("time"))}
+    vidx.ihist(vt,nqIN[CDX][sy].vl,htmin,htmax,binsz)  
+  }
+  if(!skipsnq) {
+    mksnq()
+    {nqsdel(fnq[CDX]) fnq[CDX]=FreqNQS(snq[CDX],lcol.o(CDX))}
+  }
+  initnqCTY(CDX)
+  {vq[CDX].verbose=1 dealloc(a)}
+}
+
+//* initAllMyNQs() - initMyNQs for all numcols
+proc initAllMyNQs () { local cdx
+  cdx=CDX
+  for CDX=0,numcols-1 initMyNQs()
+  CDX=cdx
+}
+
+//* clrAllMyNQs() - clrMyNQs for all numcols
+proc clrAllMyNQs () { local cdx
+  cdx=CDX
+  for CDX=0,numcols-1 clrMyNQs()
+  CDX=cdx
+}
+ 
+//* getTEKTaunq() gets transfer entropy and ktau from inputs->cells
+obfunc getTEKTaunq () { local sy,loc,idx,vbt localobj nqt,vtmp
+  {nqt=new NQS("id","sy","loc","te","nte","ktau") initMyNQs()}
+  {vbt=verbose_infot verbose_infot=0}
+  for case(&sy,AM,NM,GA,AM2,NM2,GA2) if(nqIN[CDX][sy]!=nil) {
+    if(sy<AM2)loc=SOMA else loc=DEND
+    for idx=0,col[CDX].allcells-1 { vtmp=normte(nqIN[CDX][sy].v[idx],nqCO[CDX].v[idx],30)
+      if(idx%100==0) printf("%s:idx=%d\n",STYP.o(sy).s,idx)
+      nqt.append(idx,sy,loc,vtmp.x(0),vtmp.x(2),nqIN[CDX][sy].v[idx].kcorrel(nqCO[CDX].v[idx],1))
+    }
+  }
+  for idx=nqt.m-2,nqt.m-1 nqt.v[idx].unnan() //get rid of nans
+  {verbose_infot=vbt return nqt}
+}
+ 
+// //* getTEnqAllsub -- 
+// // gets nTE from all inputs of a cell type -> all outputs of a specific cell type
+// obfunc getTEnqAllsub () { local a,row,ct,sy,id,poid,pls,prid,cts,tyt,\
+//                        idcol,sycol,INTFidcol,pulsecol,loccol\
+//                        localobj nqt,vtmp
+// cts=$1
+// nqin.tog("DB")  nqt=new NQS("id","type","prid","poid","pulse","sy","same","loc","te","nte")
+// initMyNQs()
+// {idcol=nqin.fi("id")  sycol=nqin.fi("sy")  INTFidcol=nqin.fi("INTFid")}
+// {pulsecol=nqin.fi("pulse")  loccol=nqin.fi("loc")}
+// {nqin.select(-1,"type",cts)  nqin.verbose=0 pls=0}
+// printf("\nid:")
+// for id=ix[cts],ixe[cts] {
+//   ct = ce.o(id).type
+//   if(id%20==0) printf("\n")
+//   printf("%d ",id)
+//   for vtr(&row,nqin.ind) {
+//     {prid=nqin.v[INTFidcol].x(row)      poid=nqin.v[idcol].x(row)}
+//     {sy=nqin.v[sycol].x(row)      loc=nqin.v[loccol].x(row)}
+//     vtmp = normte(nqIN[CDX].v[prid],nqCO[CDX].v[id],30)
+//     nqt.append(id,ct,prid,poid,pls,sy,poid==id,loc,vtmp.x(0),vtmp.x(2))
+//   }
+// }
+// printf("\n")
+// for id=0,nqt.m-1 nqt.v[id].unnan()
+// nqin.verbose=1
+// return nqt
+// }
+// 
+// 
+// //* ccntevsbinsz(prid,poid,vbins,nq)
+// obfunc ccntevsbinsz () { local prid,poid localobj vbins,vtmp,nq
+// prid=$1 poid=$2 vbins=$o3
+// nq=$o4
+// if(nq==nil) nq=new NQS("prid","poid","binsz","te","nte","prty","poty") else nq.tog("DB")
+// for vtr(&binsz,vbins) {
+//   print "binsz" , binsz
+//   clrMyNQs()
+//   initMyNQs()
+//   vtmp = normte(nqCO[CDX].v[prid],nqCO[CDX].v[poid],30)
+//   nq.append(prid,poid,binsz,vtmp.x(0),vtmp.x(2),ce.o(prid).type,ce.o(poid).type)
+// }
+// return nq
+// }
+// //* tyntevsbinsz(Vec of pre-type, Vec of po-type, Vec of bin sizes, nq output)
+// obfunc tyntevsbinsz () { local prid,poid,prty,poty,verb localobj vbins,vtmp,nq,vprty,vpoty
+// vprty=$o1 vpoty=$o2 vbins=$o3 nq=$o4
+// if(numarg()>4)verb=$5 else verb=0
+// if(nq==nil) nq=new NQS("prid","poid","binsz","te","nte","prty","poty") else nq.tog("DB")
+// nclnq[CDX].verbose=0
+// for vtr(&binsz,vbins) {
+//   print "binsz " , binsz
+//   clrMyNQs()
+//   initMyNQs()
+//   for vtr(&prty,vprty) for vtr(&poty,vpoty) {
+//     if(prty==poty || div[prty][poty][0]<1) continue
+//     print "prty : " , CTYP.o(prty).s, " , poty : ", CTYP.o(poty).s
+//     for prid=ix[prty],ixe[prty] {
+//       if(nclnq[CDX].select("prid",prid,"poty",poty)) for nclnq[CDX].qt(&poid,"poid") {
+//         if(verb) print "prid " , prid , " poid " , poid
+//         vtmp=normte(nqCO[CDX].v[prid],nqCO[CDX].v[poid],30)
+//         nq.append(prid,poid,binsz,vtmp.x(0),vtmp.x(2),prty,poty)
+//       }
+//     }
+//   }
+// }
+// nclnq[CDX].verbose=1
+// return nq
+// }
+
+//* binarize(vec) - set all values > 0 to 1, everything else to 0
+proc binarize () { local i,sz localobj vin
+  vin=$o1 sz=vin.size()-1
+  for i=0,sz if(vin.x(i)>0) vin.x(i)=1 else vin.x(i)=0
+}
+
+//* mknclnq - make an NQS with connectivity info
+proc mknclnq () { local idx,jdx,ty1,ty2,sy,loc,ic1,ic2,lt1,gid1,gid2,c1,c2,c localobj adj,ce,nc
+  if(nclnq!=nil) return
+  nclnq=new NQS("prid","poid","prty","poty","sy","loc","col1","col2","gid1","gid2","w")
+  for c=0,numcols-1 { // intra-column wiring for all the columns
+    {ce=col[c].ce adj=AdjList(0,ce.count-1,0,ce)}
+    for idx=0,adj.count-1 { ty1=ce.o(idx).type
+      gid1=ce.o(idx).gid
+      if(!ice(ty1)) {
+        for vtr(&jdx,adj.o(idx)) { ty2=ce.o(jdx).type
+          nclnq.append(idx,jdx,ty1,ty2,AM2,synloc[ty1][ty2],c,c,gid1,ce.o(jdx).gid,wmat[ty1][ty2][AM2][0])
+          nclnq.append(idx,jdx,ty1,ty2,NM2,synloc[ty1][ty2],c,c,gid1,ce.o(jdx).gid,wmat[ty1][ty2][NM2][0])
+        }
+      } else {
+        if(IsLTS(ty1)) sy=GA2 else sy=GA
+        for vtr(&jdx,adj.o(idx)) { ty2=ce.o(jdx).type
+          nclnq.append(idx,jdx,ty1,ty2,sy,synloc[ty1][ty2],c,c,gid1,ce.o(jdx).gid,wmat[ty1][ty2][sy][0])
+        }
+      }
+    }
+  }
+  for ltr(nc,ncl) { // inter-column wiring for all the columns
+    if(!(isojt(nc.pre,INTF6[0]) && isojt(nc.syn,INTF6[0]))) continue // only looking btwn INTF6 cells
+    {idx=nc.pre.id ty1=nc.pre.type gid1=nc.pre.gid c1=nc.pre.col}
+    {jdx=nc.syn.id ty2=nc.syn.type gid2=nc.syn.gid c2=nc.syn.col}
+    if(!ice(ty1)) {
+      nclnq.append(idx,jdx,ty1,ty2,AM2,synloc[ty1][ty2],c1,c2,gid1,gid2,nc.weight(AM2))
+      nclnq.append(idx,jdx,ty1,ty2,NM2,synloc[ty1][ty2],c1,c2,gid1,gid2,nc.weight(NM2))
+    } else {
+      if(IsLTS(ty1)) sy=GA2 else sy=GA
+      nclnq.append(idx,jdx,ty1,ty2,sy,synloc[ty1][ty2],c1,c2,gid1,gid2,nc.weight(sy))
+    }
+  }
+}
+
+//* FullAdjList(makenclnq,skipI) - make adjacency list that has intercol/intracol info
+// uses global identifier (gid) of each cell (not intracol id)
+obfunc FullAdjList () { local i,j,sz,skipI,mknq,a localobj adj,vt,vg1,vg2,vex
+  if(nclnq==nil)mknq=1 else {
+    if(numarg()>0)mknq=$1 else mknq=1
+  }
+  if(mknq) {nqsdel(nclnq) mknclnq()} // has all the connectivity info
+  nclnq.tog("DB")
+  if(numarg()>1)skipI=$2 else skipI=1 //skip inhib cells by default
+  a=allocvecs(vex,vt)
+  {adj=new List() vg1=nclnq.getcol("gid1") vg2=nclnq.getcol("gid2")}
+  sz=MAXxy(vg1.max,vg2.max)
+  for i=0,sz adj.append(new Vector())
+  if(skipI) { vex.resize(sz+1) // skip inhib cells
+    for i=0,sz vex.x(i)=(INTF6[i].flag("inh")==0)
+    for i=0,vg1.size-1 if(vex.x(vg1.x(i)) && vex.x(vg2.x(i))) {
+      adj.o(vg1.x(i)).append(vg2.x(i))
+    }
+  } else for i=0,vg1.size-1 adj.o(vg1.x(i)).append(vg2.x(i))
+  for i=0,sz if(adj.o(i).size) { // make sure all are unique, since nclnq has connection info for each synapse type
+    {vt.resize(adj.o(i).size) adj.o(i).uniq(vt)}
+    {adj.o(i).resize(0) vt.sort() adj.o(i).copy(vt)}
+  }
+  dealloc(a)
+  return adj
+}
+
+//* getsy(from,to) - get synapse type , either returns AM2 or GA,GA2 , never returns NMDA
+func getsy () { local from,to
+  from=$1 to=$2
+  if(ice(from)) {
+    if(IsLTS(from)) return GA2 else return GA
+  } else return AM2
+}
+
+//* GraphNQ - get an NQS with graph properties (path length,clustering-coeff,centrality,etc.)
+obfunc GraphNQ () { local i,j,c,ediv,econv,iconv,idiv,intraediv,intraeconv,intraidiv,intraiconv,\
+                   interediv,intereconv,interidiv,intericonv,gdx,wediv,weconv,wiconv,widiv,\
+                   wintraediv,wintraeconv,wintraidiv,wintraiconv,a\
+                   localobj gnq,vexl,vexcc,vcent,cel,vc,vd,viec,vied,viid,viic,xo,adjf,vwexl,\
+                   vwiec,vwied,vwiid,vwiic,vtmp
+  {adjf=adj=FullAdjList() vexl=GetNetEXL() vexcc=GetNetEXCC()}
+  a=allocvecs(vcent,vc,vd,vied,viec,viid,viic,vwiec,vwied,vwiid,vwiic,vtmp) 
+  {vcent.resize(adj.count) GetCentrality_intfsw(adj,vcent)}  
+  gnq=new NQS("gid","id","ty","ice","col")
+  gnq.resize("exl","excc","cent","ediv","econv","idiv","iconv") //pathlen,clustering,centrality,total div/conv
+  gnq.resize("interEdiv","interEconv","interIdiv","interIconv") //intercolumn div/conv
+  gnq.resize("intraEdiv","intraEconv","intraIdiv","intraIconv") //intracolumn div/conv
+  gnq.resize("wediv","weconv","widiv","wiconv") //weighted div/conv
+  gnq.resize("winterEdiv","winterEconv","winterIdiv","winterIconv") //weighted intercolumn div/conv
+  gnq.resize("wintraEdiv","wintraEconv","wintraIdiv","wintraIconv") //weighted intracolumn div/conv
+  {vrsz(CTYPi,vc,vd) vrsz(vcent.size,viec,vied,viid,viic,vwiec,vwied,vwiid,vwiic) vtmp.resize(adj.count)}
+  for ltr(xo,ncl) if(isojt(xo.pre,INTF6[0]) && isojt(xo.syn,INTF6[0])) { // intercol div/conv
+    if(ice(xo.pre.type)) {
+      viic.x(xo.syn.gid)+=1
+      vwiic.x(xo.syn.gid)+=xo.weight(getsy(xo.pre.type,xo.syn.type))
+    } else {
+      viec.x(xo.syn.gid)+=1
+      vwiec.x(xo.syn.gid)+=xo.weight(getsy(xo.pre.type,xo.syn.type))
+    }
+    if(ice(xo.syn.type)) {
+      viid.x(xo.pre.gid)+=1
+      vwiid.x(xo.pre.gid)+=xo.weight(getsy(xo.pre.type,xo.syn.type))
+    } else {
+      vied.x(xo.pre.gid)+=1
+      vwied.x(xo.pre.gid)+=xo.weight(getsy(xo.pre.type,xo.syn.type))
+    }
+  }
+  for i=0,vcent.size-1 { cel=INTF6[i]
+    {cel.getdvi(vtmp) vd.fill(0)}
+    for j=0,vtmp.size-1 vd.x(col[cel.col].ce.o(vtmp.x(j)).type)+=1
+    {cel.getconv(1.2,vc) ediv=econv=iconv=idiv=wediv=weconv=wiconv=widiv=0}
+    for j=0,CTYPi-1 {
+      if(ice(j)) {
+        idiv+=vd.x(j) iconv+=vc.x(j)
+        widiv += vd.x(j)*col[cel.col].wmat[cel.type][j][getsy(cel.type,j)]
+        wiconv += vc.x(j)*col[cel.col].wmat[j][cel.type][getsy(j,cel.type)]
+      } else {
+        econv+=vc.x(j) ediv+=vd.x(j)
+        wediv += vd.x(j)*col[cel.col].wmat[cel.type][j][getsy(cel.type,j)]
+        weconv += vc.x(j)*col[cel.col].wmat[j][cel.type][getsy(j,cel.type)]
+      }
+    }
+    {intraediv=ediv intraeconv=econv intraidiv=idiv intraiconv=iconv}
+    {wintraediv=wediv wintraeconv=weconv wintraidiv=widiv wintraiconv=wiconv}
+    {idiv+=viid.x(i) iconv+=viic.x(i) ediv+=vied.x(i) econv+=viec.x(i)} // add in intercol div/conv
+    {widiv+=vwiid.x(i) wiconv+=vwiic.x(i) wediv+=vwied.x(i) weconv+=vwiec.x(i)}// add in intercol weighted div/conv
+    gnq.append(i,cel.id,cel.type,ice(cel.type),cel.col,vexl.x(i),vexcc.x(i),vcent.x(i),ediv,econv,idiv,iconv,vied.x(i),viec.x(i),viid.x(i),viic.x(i),intraediv,intraeconv,intraidiv,intraiconv,wediv,weconv,widiv,wiconv,vwied.x(i),vwiec.x(i),vwiid.x(i),vwiic.x(i),wintraediv,wintraeconv,wintraidiv,wintraiconv)
+  }
+  {gnq.resize("intraexl","intraexcc","intracent") gnq.pad()} //intracolumn pathlength,clustering-coeff,centrality
+  for c=0,numcols-1 { 
+    adj=AdjList(0,col[c].allcells-1,1,col[c].ce)
+    {vexl=GetNetEXL() vexcc=GetNetEXCC()}
+    {vcent.resize(adj.count) vcent.fill(0) GetCentrality_intfsw(adj,vcent)}
+    for i=0,col[c].allcells-1 { gdx=col[c].ce.o(i).gid
+      gnq.v[gnq.m-3].x(gdx)=vexl.x(i)
+      gnq.v[gnq.m-2].x(gdx)=vexcc.x(i)
+      gnq.v[gnq.m-1].x(gdx)=vcent.x(i)
+    }
+  }  
+  {adj=adjf dealloc(a) return gnq}
+}
+ 
+//* getnTEvecs(cell id, synapse, location, internal inputs vec, external inputs vec, vpl inputs vec,[list of internal input vecs])
+// fills $o4,$o5,$o6 with corresponding inputs. returns 1 if VPL inputs were found, 0 otherwise
+// last optional arg will be a list of internal input vecs
+// can be used as a helper function in allntevsbinsz
+// +++++++ NB: vvpl is not currently used since no VPL inputs implemented for this sim yet!! ++++++++
+func getnTEvecs () { local cidx,sy,loc,hasvpl,prid,asl,a localobj vint,vext,vvpl,vprid,lint
+  {cidx=$1 sy=$2 loc=$3 vint=$o4 vext=$o5 vvpl=$o6 a=allocvecs(vprid)}
+  if(numarg()>6) {lint=$o7 asl=1 lint.remove_all()} else asl=0
+  if(vext.size!=nqCO[CDX].v[cidx].size) vrsz(nqCO[CDX].v[cidx].size,vext,vint,vvpl)
+  {vext.fill(0) vint.fill(0) vvpl.fill(0) hasvpl=0}
+  // if((hasvpl=nqin.select("id",cidx,"syn",sy,"loc",loc,"pulse",-1))>0) {          
+  //   intfid=nqin.fetch("INTFid") // VPL input from an INTF
+  //   vvpl.add(nqIN[CDX].v[intfid])
+  // }
+  mknclnq()
+  vext.add(nqIN[CDX][sy].v[cidx]) // external inputs [but not VPL]  
+  vprid.resize(nclnq.select("poid",cidx,"sy",sy)) //select internal inputs to this cell
+  if(vprid.size>0) { 
+    nclnq.getcol("prid").uniq(vprid) // IDs to use
+    if(asl) {
+      for vtr(&prid,vprid) {
+        lint.append(new Vector())
+        lint.o(lint.count-1).copy(nqCO[CDX].v[prid])
+        vint.add(nqCO[CDX].v[prid])      
+      }
+    } else {
+      for vtr(&prid,vprid) vint.add(nqCO[CDX].v[prid])      
+    }
+  }
+  dealloc(a)
+  return hasvpl
+}
+ 
+//* allntevsbinsz(Vec of bin sizes, nq output, verbose)
+// columns of output NQS:
+//  id = id of cell, type = type of cell, ice = whether inhibitory, binsz = bin sizes used in ms,
+//  intnte = nTE from cells within network at the synapse, extnte = nTE from external inputs at the
+//  synapse, sumnte = nTE from internal + external inputs at the synapse, sy = synapse type,
+//  loc = location of synapse, vplnte = nTE from external VPL inputs at the synapse, ocnte = nTE from
+//  inputs from other COLUMNs
+obfunc allntevsbinsz () { local i,hasvpl,hasint,hasoc,sy,loc,prid,poid,prty,poty,verb,cidx,a,intfid,\
+                         intnte,extnte,sumnte,vplnte,ocnte,idx,ty,ic\
+                         localobj vbins,vtmp,nq,vprty,vpoty,vint,vext,vvpl,vprid,vc,vsy,vloc,ce,voc
+  a=allocvecs(vext,vint,vvpl,vprid,vc,vsy,vloc,voc)
+  vbins=$o1 nq=$o2
+  if(numarg()>2)verb=$3 else verb=0
+  if(nq==nil) nq=new NQS("gid","col","id","type","ice","binsz","intnte","extnte","sumnte","sy","loc","vplnte","ocnte") else nq.tog("DB")
+  {mknclnq() nclnq.verbose=hasvpl=vplnte=0}
+  {vsy.append(AM2,NM2,GA2,GA) vloc.append(DEND,DEND,DEND,SOMA)} // synapse/location pairs
+  
+  for vtr(&binsz,vbins) { // go thru different bin sizes
+    print "binsz " , binsz    
+    {clrAllMyNQs()    initAllMyNQs()} // initialize NQS with histograms
+    for CDX=0,numcols-1 { print "COL ", CDX // go thru all COLUMNs
+      {vrsz(nqCO[CDX].v.size,vext,vint,vvpl,voc) ce=col[CDX].ce}
+      for cidx=0,col[CDX].allcells-1 {     //go thru all cells
+      
+        {ty=ce.o(cidx).type ic=ice(ty)} // type of cell & whether inhibitory
+      
+        if(cidx%100==0) print cidx
+      
+        for i=0,vsy.size-1 { // go thru all synapse/location pairs
+          {sy=vsy.x(i) loc=vloc.x(i)} // synapse/location pair
+          {vext.fill(0) vint.fill(0) vvpl.fill(0) voc.fill(0)} // initialize to 0
+        
+          //vplnte = -2 // invalid value
+          //// nTE @ AMPA on DEND from VPL inputs    
+          //if((hasvpl=nqin.select("id",cidx,"syn",sy,"loc",loc,"pulse",-1))>0) {          
+          //  intfid=nqin.fetch("INTFid") // VPL input from an INTF
+          //  vvpl.add(nqIN[CDX].v[intfid])
+          //  vtmp=normte(vvpl,nqCO[CDX].v[cidx],30) // calculate the nTE
+          //  vplnte=vtmp.x(2) // external nTE from VPL        
+          //}   
+          
+          intnte=sumnte=extnte=ocnte=0
+
+          vext.add(nqIN[CDX][sy].v[cidx]) // external inputs [but not VPL]
+          vtmp=normte(vext,nqCO[CDX].v[cidx],30) // calculate the nTE
+          extnte=vtmp.x(2) // external nTE
+
+          vint.fill(0) // sum of internal INTRA-COLUMN inputs to this cell synapse
+          vprid.resize(nclnq.select("poid",cidx,"sy",sy,"col1",CDX,"col2",CDX)) //select intra-COLUMN inputs to this cell
+          if((hasint=vprid.size)>0) { 
+            nclnq.getcol("prid").uniq(vprid) // IDs to use
+            for vtr(&prid,vprid) vint.add(nqCO[CDX].v[prid])      
+            vtmp=normte(vint,nqCO[CDX].v[cidx],30)
+            intnte=vtmp.x(2) // internal nTE (cells within COLUMN)
+            vext.add(vint) // external + internal inputs
+          }
+
+          voc.fill(0) // sum of INTER-COLUMN inputs to this cell synapse
+          vprid.resize(nclnq.select("gid2",ce.o(cidx).gid,"sy",sy,"col1","!=",CDX)) //select inter-COLUMN inputs to this cell
+          if((hasoc=vprid.size)>0) {
+            nclnq.getcol("gid1").uniq(vprid) // GIDs to use
+            for vtr(&prid,vprid) voc.add(nqCO[INTF6[prid].col].v[INTF6[prid].id])
+            vtmp=normte(voc,nqCO[CDX].v[cidx],30)
+            ocnte=vtmp.x(2) // internal nTE (cells within COLUMN)
+            vext.add(voc) // external + internal + from other COLUMNs inputs
+          }
+
+          //if(hasvpl) vext.add(vvpl) // add VPL inputs, if available
+          if(hasoc || hasint) {
+            vtmp=normte(vext,nqCO[CDX].v[cidx],30) // nTE of external+internal+other COLUMN inputs to cell's spikes
+            sumnte=vtmp.x(2)
+          } else sumnte=extnte
+          nq.append(ce.o(cidx).gid,CDX,cidx,ty,ic,binsz,intnte,extnte,sumnte,sy,loc,vplnte,ocnte) // save it
+        }
+      }
+    }
+  }
+  {nclnq.verbose=1 dealloc(a)}
+  return nq
+}
+
+//* getpopcktaunq() gets correlations between pairs of cells - with sliding time window - used
+// for population coordination matrix
+// $1=winsz,$2=wininc
+obfunc getpopcktaunq () { local a,i,j,kt,ty1,ty2,ic1,winsz,wininc,tt,mx localobj nqcc,v1,v2,vc
+  a=allocvecs(v1,v2,vc)
+  {winsz=$1 wininc=$2}
+  nqcc=new NQS("id1","id2","ty1","ty2","ic1","ic2","ktau","t")
+  if(nqCO[CDX]==nil) initMyNQs()
+  for(tt=0;tt<nqCO[CDX].v.size;tt+=wininc) {
+    vrsz(0,vc,v1,v2)
+    for i=0,nqCO[CDX].m-1 {
+      mx=MIN(tt+winsz,nqCO[CDX].v[i].size()-1)
+      v1.copy(nqCO[CDX].v[i],tt,mx)
+      if(i%100==0) printf("i=%d\n",i)
+      ty1=col[CDX].ce.o(i).type
+      ic1=ice(ty1)
+      for j=i+1,nqCO[CDX].m-1 {
+        ty2=col[CDX].ce.o(j).type
+        v2.copy(nqCO[CDX].v[j],tt,mx)
+        kt=v1.kcorrel(v2,1)
+        nqcc.append(i,j,ty1,ty2,ic1,ice(ty2),kt,tt)
+      }
+    }
+  }
+  nqcc.v[nqcc.m-2].unnan()
+  dealloc(a)
+  return nqcc
+}
+ 
+//* getpopcmat(nqs from getpopcktaunq, skipice) - get population coordination matrix
+//$o1=nqs from getpopcktaunq
+obfunc getpopcmat () { local a,tt,idx,jdx,skipice localobj mc,nq,vt,ls
+  nq=$o1 nq.tog("DB") if(numarg()>1)skipice=$2 else skipice=0
+  a=allocvecs(vt)
+  vt.resize(nq.v.size)
+  nq.getcol("t").uniq(vt)
+  ls=new List()
+  if(skipice) {
+    for vtr(&tt,vt) {
+      nq.select("t",tt,"ic1",0,"ic2",0)
+      ls.append(new Vector())
+      ls.o(ls.count-1).copy(nq.getcol("ktau"))
+    }
+  } else {
+    for vtr(&tt,vt) {
+      nq.select("t",tt)
+      ls.append(new Vector())
+      ls.o(ls.count-1).copy(nq.getcol("ktau"))
+    }
+  }
+  mc=new Matrix(ls.count,ls.count)
+  for idx=0,ls.count-1 for jdx=idx+1,ls.count-1 mc.x(idx,jdx)=mc.x(jdx,idx)=ls.o(idx).pcorrel(ls.o(jdx))
+  for idx=0,ls.count-1 mc.x(idx,idx)=1
+  dealloc(a)
+  return mc
+}
+ 
+//* getcellcelltaunq([vc1,vc2]) gets correlations between pairs of cells
+// 2 optional args are vectors of pairs of COLUMN IDs for which to get correlations
+obfunc getcellcelltaunq () { local a,i,j,ii,kt,ty1,ty2,ic1,rel,c1,c2,gid1,gid2 localobj nqcc,vpv,ce1,ce2,vc1,vc2,nqtmp
+  a=allocvecs(vpv,vc1,vc2) vpv.resize(1)
+  nqcc=new NQS("id1","id2","ty1","ty2","ic1","ic2","ktau","pval","rel","col1","col2","gid1","gid2")
+  {clrAllMyNQs()    initAllMyNQs()}
+  if(numarg()>=2) {
+    vc1.copy($o1) vc2.copy($o2)
+  } else {
+    for c1=0,numcols-1 for c2=0,numcols-1 {
+      if(c2<c1) continue
+      {vc1.append(c1) vc2.append(c2)}
+    }
+  }
+  for ii=0,vc1.size-1 { 
+    {c1=vc1.x(ii) ce1=col[c1].ce}
+    {c2=vc2.x(ii) ce2=col[c2].ce}
+    print "c",c1," c",c2
+    nqtmp=new NQS("id1","id2","ty1","ty2","ic1","ic2","ktau","pval","rel","col1","col2","gid1","gid2")
+    if(c1==c2) { // INTRA-COLUMN
+      for i=0,nqCO[c1].m-1 {
+        if(i%100==0) printf("i=%d\n",i)
+        {ty1=ce1.o(i).type ic1=ice(ty1) gid1=ce1.o(i).gid}
+        for j=i+1,nqCO[c2].m-1 {
+          ty2=ce2.o(j).type
+          kt=nqCO[c1].v[i].kcorrel(nqCO[c2].v[j],1,vpv)
+          rel=0 //independent
+          if(vpv.x(0) < 0.05) {
+            if(kt>0) {
+              rel=1 //positive
+            } else if(kt<0) {
+              rel=-1 //negative
+            } 
+          }
+          nqtmp.append(i,j,ty1,ty2,ic1,ice(ty2),kt,vpv.x(0),rel,c1,c2,gid1,ce2.o(j).gid)
+        }
+      }
+    } else { // INTER-COLUMN
+      for i=0,nqCO[c1].m-1 {
+        if(i%100==0) printf("i=%d\n",i)
+        {ty1=ce1.o(i).type ic1=ice(ty1) gid1=ce1.o(i).gid}
+        for j=0,nqCO[c2].m-1 {
+          ty2=ce2.o(j).type
+          kt=nqCO[c1].v[i].kcorrel(nqCO[c2].v[j],1,vpv)
+          rel=0 //independent
+          if(vpv.x(0) < 0.05) {
+            if(kt>0) {
+              rel=1 //positive
+            } else if(kt<0) {
+              rel=-1 //negative
+            } 
+          }
+          nqtmp.append(i,j,ty1,ty2,ic1,ice(ty2),kt,vpv.x(0),rel,c1,c2,gid1,ce2.o(j).gid)
+        }
+      }
+    }
+    {nqtmp.v[nqtmp.fi("ktau")].unnan() nqcc.append(nqtmp) nqsdel(nqtmp)}
+  }
+  {dealloc(a) return nqcc}
+}
+ 
+//* getcellcelltenq() gets transfer entropies between pairs
+// of cells (in both directions)
+// iff monosynapticflag == 1 only gets for cell pairs that are connected
+obfunc getcellcelltenq () { local a,i,j,k,kt,ty1,ty2,ic1,spks1,spks2,c1,c2,gid1,gid2,nte,nshuf,fas\
+                           localobj nqte,vtmp,ce1,ce2,vs0,vs1,vte,vnte,vfrom,vto
+  if(numarg()>0)fas=$1 else fas=0
+  nqte=new NQS("id1","id2","ty1","ty2","ic1","ic2","spks1","spks2","col1","col2","gid1","gid2","te","nte")
+  nshuf=30
+  {clrAllMyNQs() initAllMyNQs()}
+  if(fas) {
+    a=allocvecs(vtmp,vs0,vs1,vte,vnte,vfrom,vto) vrsz(4,vtmp)
+    for c1=0,numcols-1 { ce1=col[c1].ce
+      vrsz(nqCO[c1].m,vs0)
+      for i=0,nqCO[c1].m-1 vs0.x(i)=nqCO[c1].v[i].sum()
+      for c2=0,numcols-1 { ce2=col[c2].ce
+        print "C", c1, "-> C",c2
+        vrsz(nqCO[c2].m,vs1) // save spike counts
+        for i=0,nqCO[c2].m-1 vs1.x(i)=nqCO[c2].v[i].sum()
+        for i=0,nqCO[c1].m-1 { // get from/to indices
+          for j=0,nqCO[c2].m-1 { if(c1==c2 && j==i)continue
+            {vfrom.append(i) vto.append(j)}
+          }
+        }
+        vrsz(vfrom.size,vte,vnte)
+        vfrom.ntel2(vto,nqCO[c1].vl,nqCO[c2].vl,vnte,vte,nshuf) // calculate transfer entropy
+        k=0 //index into vte,vnte
+        for i=0,nqCO[c1].m-1 { // save pairwise nTE values and other info into NQS
+          if(i%100==0) printf("i=%d\n",i)
+          {ty1=ce1.o(i).type ic1=ice(ty1) spks1=vs0.x(i) gid1=ce1.o(i).gid}
+          for j=0,nqCO[c2].m-1 {
+            if(c1==c2 && j==i)continue
+            {ty2=ce2.o(j).type spks2=vs1.x(j)}
+            nqte.append(i,j,ty1,ty2,ic1,ice(ty2),spks1,spks2,c1,c2,gid1,ce2.o(j).gid,vte.x(k),vnte.x(k))
+            k+=1
+          }
+        }        
+      }
+    }
+  } else {
+    a=allocvecs(vtmp,vs0,vs1) vrsz(4,vtmp)
+    for c1=0,numcols-1 { ce1=col[c1].ce
+      vrsz(nqCO[c1].m,vs0)
+      for i=0,nqCO[c1].m-1 vs0.x(i)=nqCO[c1].v[i].sum()
+      for c2=0,numcols-1 { ce2=col[c2].ce
+        print "C", c1, "-> C",c2
+        vrsz(nqCO[c2].m,vs1) // save spike counts
+        for i=0,nqCO[c2].m-1 vs1.x(i)=nqCO[c2].v[i].sum()
+        for i=0,nqCO[c1].m-1 { // get pairwise nTE values
+          if(i%100==0) printf("i=%d\n",i)
+          {ty1=ce1.o(i).type ic1=ice(ty1) spks1=vs0.x(i) gid1=ce1.o(i).gid}
+          for j=0,nqCO[c2].m-1 {
+            if(c1==c2 && j==i)continue
+            {ty2=ce2.o(j).type spks2=vs1.x(j)}
+            nte=nqCO[c1].v[i].tentropspks(nqCO[c2].v[j],vtmp,nshuf)
+            nqte.append(i,j,ty1,ty2,ic1,ice(ty2),spks1,spks2,c1,c2,gid1,ce2.o(j).gid,vtmp.x(0),nte)
+          }
+        }
+      }
+    }
+  }
+  dealloc(a)
+  for i=nqte.fi("te"),nqte.fi("nte") nqte.v[i].unnan()
+  return nqte
+}
+ 
+// //* getincelltenqt() - get nqs of input->cell normalized transfer entropy vs time
+// //getincelltenqt(bmin,bmax,binc,winsz)
+// // bmin is min bin, bmax is max bin, binc is # of bins to move over by, winsz = # of bins to examine
+// obfunc getincelltenqt () { local a,sy,id,intfid,idx,winsz,bmin,bmax,binc,bb,ty,pls,sh2\
+//                         localobj nqt,vtmp,v1,v2,visi
+// bmin=$1 bmax=$2 binc=$3 winsz=$4
+// if(numarg()>4 && nqisi[CDX]!=nil)sh2=$5 else sh2=0
+// sy=id=intfid=0
+// nqin.tog("DB")
+// nqt=new NQS("id","type","syn","t","nte","INTFid","pulse")
+// initMyNQs()
+// a=allocvecs(v1,v2,visi)
+// vrsz(nqt.v[0].size,v1,v2)  vrsz(0,v1,v2)
+// idx=0
+// for nqin.qt(&id,"id",&sy,"sy",&intfid,"INTFid",&ty,"type",&pls,"pulse") {
+//   if(sh2) {
+//     nqisi[CDX].select("id",id)
+//     visi.copy(nqisi[CDX].getcol("isi"))
+//   }
+//   for(bb=bmin;bb+winsz<=bmax;bb+=binc){
+//     v1.copy(nqIN[CDX].v[intfid],bb,bb+winsz)
+//     v2.copy(nqCO[CDX].v[id],bb,bb+winsz)
+//     if(sh2) vtmp=normte(v1,v2,30,visi,binsz,htmin) else vtmp=normte(v1,v2,30)
+//     vtmp.unnan()
+//     nqt.append(id,ty,sy,htmin+bb*binsz,vtmp.x(2),intfid,pls)
+//   }
+//   if(idx%100==0) printf("idx=%d\n",idx)
+//   idx+=1
+// }
+// dealloc(a)
+// return nqt
+// }
+
+//* drawEIktau() $o1=nqc,[$2=pulse ID optional]
+proc drawEIktau () { local x,pdx,nn localobj nqc,str
+  if(g==nil)gg()
+  nqc=$o1
+  if(numarg()>1)pdx=$2 else pdx=-1
+  str=new String()
+  if(pflg==0) g.label(0,0,"counts") else g.label(0,0,"probability")
+  ers=0 
+  clr=3
+  if(pdx>-1) nqc.select("syn",AM,"pulse",pdx) else nqc.select("syn",AM)
+  hist(g,nqc.getcol("ktau"))
+  sprint(str.s,"E input/output ktau, avg=%g",nqc.getcol("ktau").mean)
+  g.label(0,0,str.s)
+  if(pdx>-1) nn=nqc.select("syn",GA,"pulse",pdx) else nn=nqc.select("syn",GA)
+  if(nn>0) {
+    clr=2
+    sprint(str.s,"I input/output ktau, avg=%g",nqc.getcol("ktau").mean)
+    g.label(0,0,str.s)
+    hist(g,nqc.getcol("ktau"))  
+  }
+}
+ 
+//* drawEIcmp() -- draws histo comparing AM vs GA input->output relationship on column $s2
+//$o1=nqs, $s2=column to perform comparison on,opt arg 3=pulse id, opt 4th arg=cell-type
+proc drawEIcmp () { local x,pdx,nn localobj nq,str
+  if(g==nil)gg()
+  nq=$o1  str=new String()  g.color(1)
+  if(pflg==0) g.label(0,0,"counts") else g.label(0,0,"probability")
+  //drline(-1,0,1,0,g,1,3)
+  {ers=0   clr=3  g.color(clr)}
+  if(numarg()>2)pdx=$3 else pdx=-1
+  if(numarg()>3) nq.select("syn",AM,"type",$4) else nq.select("syn",AM)
+  if(pdx!=-1)nq.select("&&","pulse",pdx)
+  hist(g,nq.getcol($s2))
+  if(numarg()>3) {
+    sprint(str.s,"%s:E input/output %s, avg=%g",CTYP.o($4).s,$s2,nq.getcol($s2).mean)
+  } else {
+    sprint(str.s,"E input/output %s, avg=%g",$s2,nq.getcol($s2).mean)
+  }
+  g.label(0,0,str.s)
+  
+  //GABAA @ SOMA
+  if(numarg()>3) nn=nq.select("syn",GA,"type",$4,"loc",SOMA) else nn=nq.select("syn",GA,"loc",SOMA)
+  if(nn<1)return
+  if(pdx!=-1)nn=nq.select("&&","pulse",pdx)
+  if(nn<1)return
+  {clr=2 g.color(clr)}
+  if(numarg()>3) {
+    sprint(str.s,"%s:SOMA I input/output %s, avg=%g",CTYP.o($4).s,$s2,nq.getcol($s2).mean)
+  } else {
+    sprint(str.s,"SOMA I input/output %s, avg=%g",$s2,nq.getcol($s2).mean)
+  }
+  g.label(0,0,str.s)
+  hist(g,nq.getcol($s2))  
+  
+  //GABAA @ DEND
+  if(numarg()>3) nn=nq.select("syn",GA,"type",$4,"loc",DEND) else nn=nq.select("syn",GA,"loc",DEND)
+  if(nn<1)return
+  if(pdx!=-1)nn=nq.select("&&","pulse",pdx)
+  if(nn<1)return
+  {clr=4 g.color(clr)}
+  if(numarg()>3) {
+    sprint(str.s,"%s:DEND I input/output %s, avg=%g",CTYP.o($4).s,$s2,nq.getcol($s2).mean)
+  } else {
+    sprint(str.s,"DEND I input/output %s, avg=%g",$s2,nq.getcol($s2).mean)
+  }
+  g.label(0,0,str.s)
+  hist(g,nq.getcol($s2))  
+}
+
+//nqc.select("syn",GA)
+//hist(g,nqc.getcol("ktau"))
+ 
+//* getvpow(nqf,minf,maxf)
+//get the power in a range of frequencies from nqf, the matspecgram spectrogram nqs from nqfld
+obfunc getvpow () { local a,minf,maxf,i localobj vtmp,vout,nqf,vf
+  nqf=$o1 minf=$2 maxf=$3
+  a=allocvecs(vtmp,vf) vout=new Vector()
+  {vtmp=nqf.get("pow",0).o print vtmp vout.resize(vtmp.size) vout.fill(0)}
+  {vf.resize(nqf.v.size)  nqf.getcol("f").uniq(vf)}
+  for i=0,vf.size-1 {
+    if(vf.x(i)>=minf && vf.x(i)<=maxf) {
+      vtmp=nqf.get("pow",i).o
+      vout.add(vtmp)
+    }
+    if(vf.x(i)>maxf) break
+  }
+  dealloc(a)
+  return vout
+}
+
+//* getpfcormat(nq1[,nq2]) -- nq1,nq2 are from matspecgram, getpfcormat gets power fluctuation correlation matrix
+// can get nq1,nq2 from nqfld+matspecgram like this: nq1=matspecgram(nqLFP.v,sampr,100,0,1)
+// nq2 is optional
+obfunc getpfcormat () { local r1,r2,sz,a localobj mc,v1,v2,nq1,nq2
+  a=allocvecs(v1,v2) 
+  if(numarg()==1){nq1=nq2=$o1} else {nq1=$o1 nq2=$o2}
+  {sz=MAXxy(nq1.v.size,nq2.v.size) mc=new Matrix(sz,sz)}
+  if(nq1==nq2) {
+    for r1=0,nq1.v.size-1 { v1.copy(nq1.get("pow",r1).o)
+      mc.x(r1,r1)=1
+      for r2=r1+1,nq2.v.size-1 { v2.copy(nq2.get("pow",r2).o)
+        mc.x(r1,r2) = mc.x(r2,r1) = v1.pcorrel(v2)
+      }
+    }
+  } else {
+    for r1=0,nq1.v.size-1 { v1.copy(nq1.get("pow",r1).o)
+      for r2=0,nq2.v.size-1 { v2.copy(nq2.get("pow",r2).o)
+        mc.x(r1,r2) = v1.pcorrel(v2)
+      }
+    }
+  }
+  dealloc(a)
+  return mc
+}
+
+//* getsyncarea(nqf,mc,minf,maxf,[th]) -- nqf is from matspecgram, mc is from getpfcormat
+// gets the 'synchronization area' -- the ratio of pixels in matrix with r > th / that area of the matrix
+// frequencies/area used are in range [minf,maxf]
+func getsyncarea () { local r1,c1,sa,cnt,minf,maxf,th localobj nqf,mc
+  nqf=$o1 mc=$o2 minf=$3 maxf=$4 sa=cnt=0
+  if(numarg()>4)th=$5 else th=0.2
+  for r1=0,mc.nrow-1 if(nqf.v[0].x(r1)>=minf && nqf.v[0].x(r1)<=maxf) {
+    for c1=0,r1-1 if(nqf.v[0].x(c1)>=minf && nqf.v[0].x(c1)<=maxf) {
+      if(mc.x(r1,c1)>th) sa+=1
+      cnt+=1
+    }
+  }
+  if(cnt>0) return sa/cnt else return 0
+}
+ 
+//* FileExists(path) - tests whether file exists by opening in 'r' mode
+func FileExists(){ localobj f
+  f = new File()
+  f.ropen($s1)
+  if(f.isopen()){
+    f.close()
+    return 1
+  }
+  return 0
+}
+
+//* loadmydat() - load in data from sim - this func depends on strv being set
+// $s1 == vecs file, [$s2 == nclnq file]
+func loadmydat () { local cdx,idx,a localobj vi,str,vtmp,svq
+  {a=allocvecs(vtmp) strvecs=$s1 str=new String2() svq=new String()}
+  clrAllMyNQs() // free histogram NQSs
+  printf("reading in %s vecs file\n",strvecs)
+  gvnew(strvecs) // load the Vectors
+  for cdx=0,numcols-1 {
+    {vit[cdx].vec.resize(0) vit[cdx].tvec.resize(0)}
+    {sprint(str.s,"%s_SPKS",col[cdx].name) sprint(str.t,"%s_LFP",col[cdx].name)}
+    for ltr(vi,panobj.printlist,&idx) {
+      if(!strcmp(vi.name,str.s)) {
+        print "reading in spikes for ",col[cdx].name, " from vitem ", vi.name
+        panobj.rv_readvec(idx,vit[cdx].tvec,vit[cdx].vec) //read in raster
+      }
+    }
+    sprint(svq.s,"data/%s_%s_vq.nqs",strv,col[cdx].name)
+    if(FileExists(svq.s)) {
+      print "reading in vq for ", col[cdx].name, " from ", svq.s
+      vq[cdx].rd(svq.s)
+    } 
+    sprint(str.s,"data/%s_%s_LFP.nqs",strv,col[cdx].name)
+    if(FileExists(str.s)) {
+      {nqsdel(nqLFP[cdx]) nqLFP[cdx]=new NQS(str.s)}
+    } else print "loadmydat WARNING: file ", str.s , " doesn't exist."   
+  }
+  if(numarg()>1) {
+    {strnclnq=$s2 printf("reading in %s nclnq nqs file\n",strnclnq)}
+    if(nclnq==nil) nclnq=new NQS(strnclnq) else nclnq.rd(strnclnq)
+  }
+  {dealloc(a) return 1}
+}
+ 
+//* pravgrates([duration,allcolumns,strdef output]) - print average rates of cell types after run
+//print average firing rates from vit[...], assumes sgrdur,numc same as when ran sim
+//when allcolumns==0 (default) uses vit[CDX] (CDX is global index for COLUMN)
+proc pravgrates () { local idx,ct,dur,cdx,sidx,eidx,all,a localobj vspk,vnc,str
+  if(numarg()>0)dur=$1 else dur=tstop
+  if(numarg()>1)all=$2 else all=0   
+  {a=allocvecs(vspk,vnc) vrsz(CTYPi+1,vspk,vnc) idx=ct=0 sidx=eidx=CDX str=new String2()}
+  if(all){sidx=0 eidx=numcols-1}
+  for cdx=sidx,eidx {
+    for vtr(&idx,vit[cdx].vec) vspk.x(col[cdx].ce.o(idx).type)+=1
+    for ct=0,CTYPi-1 vnc.x(ct)+=col[cdx].numc[ct]
+  }
+  for ct=0,CTYPi-1 if(vnc.x(ct)) {
+    sprint(str.t,"avg rate for %s: %gHz\n",CTYP.o(ct).s,(1e3*vspk.x(ct)/dur)/vnc.x(ct))
+    strcat(str.s,str.t)
+  }
+  print str.s
+  if(numarg()>2) $s3=str.s
+}
+//* prctcellsfired - get % of cells that fired after a run
+func prctcellsfired () { local a,i,pr,ct localobj vf
+  a=allocvecs(vf) 
+  if(numarg()>0) {
+    ct=$1
+    if(ct<0 || ct>=CTYPi) {
+      print "invalid ct = ", ct
+      return 0
+    }
+    vrsz(numc[ct],vf) vf.fill(0)
+    for vtr(&i,vit[CDX].vec) if(col[CDX].ce.o(i).type==ct) vf.x(i-ix[ct])=1
+    pr=vf.count(1)/numc[ct]
+  } else {
+    vrsz(col[CDX].allcells,vf) vf.fill(0)
+    for vtr(&i,vit[CDX].vec) vf.x(i)=1  
+    pr=vf.count(1)/col[CDX].allcells
+  }
+  dealloc(a)
+  return pr
+}
+ 
+//* minrunsv() minimal run/save of data , just save vecs, vq, nclnq
+// $1 - optional , specifices whether to save nclnq
+proc minrunsv () { local svc,cdx,svq localobj st,co
+  {st=new String() time("run()")}
+  printf("\nran sim for %g\n",tstop)
+  sprint(st.s,"data/%s_.vecs",strv)
+  {panobj.pvplist(st.s,strv) printf("saved vecs\n")}
+  for cdx=0,numcols-1 { // save NQS with LFPs
+    sprint(tstr,"data/%s_%s_LFP.nqs",strv,col[cdx].name)
+    {nqLFP[cdx].tog("DB") nqLFP[cdx].sv(tstr)}
+  }
+  if(numarg()>0) svc=$1 else svc=0
+  if(numarg()>1) svq=$2 else svq=0
+  if(svc) {
+    sprint(st.s,"data/%s_nclnq.nqs",strv)
+    {mknclnq() nclnq.tog("DB") nclnq.sv(st.s)}
+    printf("saved connectivity\n")
+  }
+  if(svq) for ltr(co,lcol,&cdx) {
+    sprint(st.s,"data/%s_%s_vq.nqs",strv,co.name)
+    {vq[cdx].tog("DB") vq[cdx].sv(st.s) printf("saved inputs for %s\n",co.name)}
+  }
+}
+
+//$s1=version string, loads the data created from minrunsv - should set strv first
+proc loadminrundat () { localobj st
+  {st=new String2() sprint(st.s,"data/%s_.vecs",$s1) sprint(st.t,"data/%s_nclnq.nqs",$s1)}
+  if(FileExists(st.t)) loadmydat(st.s,st.t) else loadmydat(st.s)
+}
+
+ //* initg -- make sure g is ready to draw
+proc initg () {
+  if(g==nil) gg()
+  g.erase_all
+}
+
+//* fing -- finish graphing
+proc fing () {
+  g.exec_menu("View = plot")
+  g.exec_menu("New Axis")
+}
+
+//* mkdrrast -- make/draw rasters from all columns
+proc mkdrrast () { local i,gvt,rsz
+  initg()
+  skipsnq=0
+  initAllMyNQs()
+  gvt=gvmarkflag
+  gvmarkflag=1
+  rsz = 2
+  for i=0,numcols-1 {
+    snq[i].marksym="O"
+    snq[i].gr("gid","t",0,i+1,rsz)
+  }
+  gvmarkflag=gvt
+  fing()
+}
+
+//* mkdr1rast -- make/draw rasters from 1 columns
+proc mkdr1rast () { local i,gvt
+  initg()
+  skipsnq = 0
+  initAllMyNQs()
+  gvt=gvmarkflag
+  gvmarkflag=1
+  snq[colidx].marksym="O"
+  snq[colidx].gr("id","t",0,i+1,rsz)
+  gvmarkflag=gvt
+  fing()
+  rasterlines()
+  fing()
+}
+ 
+//* dril(start second, end second) - draws lfp
+proc dril () { local gvt,c
+  g.erase
+  gvt=gvmarkflag
+  gvmarkflag=0
+  if(nqLFP[CDX].fi("t")==-1) {
+    nqLFP[CDX].resize("t")
+    nqLFP[CDX].v[nqLFP[CDX].m-1].indgen(0,nqLFP[CDX].v.size-1,1)
+    nqLFP[CDX].v[nqLFP[CDX].m-1].mul(vdt_INTF6)
+  }
+  if(nqLFP[CDX].select("t","[]",$1*1e3,$2*1e3)){
+    nqLFP[CDX].gr("LFP","t",0,1,3)
+    g.exec_menu("View = plot")
+  }
+  gvmarkflag=gvt
+}
+//* driln - draw lfp and increment startt counter
+proc driln () { 
+  dril(startt,startt+1)
+  print startt
+  startt+=1
+}
+//* drit(start second, end second) - draws raster
+proc drit () { local gvt
+  if(snq[CDX]==nil) mksnq()
+  g.erase
+  gvt=gvmarkflag
+  gvmarkflag=1
+  if(snq[CDX].select("t","[]",$1*1e3,$2*1e3)){
+    snq[CDX].gr("id","t",0,1,3)
+    g.exec_menu("View = plot")
+  }
+  gvmarkflag=gvt
+}
+//* draws raster, incs timer for raster
+proc dritn () { 
+  drit(startt,startt+1)
+  print startt
+  startt+=1
+}

@@ -1,0 +1,35 @@
+// $Id: redE2.hoc,v 1.1 2011/03/09 03:54:04 samn Exp $ 
+
+
+load_file("geom.hoc")
+
+{sgrhzE=300 sgrhzI=125 sgrhzNM=50 EXGain=15}
+
+double wmatex[CTYPi][STYPi],ratex[CTYPi][STYPi]
+
+proc setwmatex () {  local ct,sy
+  for ct=0,CTYPi-1 for sy=0,STYPi-1 wmatex[ct][sy]=0
+  for ct=0,CTYPi-1 {
+    ratex[ct][AM2]=sgrhzE
+    ratex[ct][NM2]=sgrhzNM
+    ratex[ct][GA2]=ratex[ct][GA]=sgrhzI
+    if(IsLTS(ct)) {
+      wmatex[ct][AM2] = 0.2
+      wmatex[ct][NM2] = 0.025
+      wmatex[ct][GA]=wmatex[ct][GA2]=0.125
+    } else {
+      wmatex[ct][NM2] = 0.05   
+      wmatex[ct][AM2] = 0.25 
+      wmatex[ct][GA]=wmatex[ct][GA2]=0.125
+    }
+    for sy=0,STYPi-1 wmatex[ct][sy] *= EXGain // apply gain control
+  }    
+}
+setwmatex()
+
+load_file("nqsnet.hoc")
+load_file("network.hoc")
+load_file("params.hoc")
+load_file("run.hoc")
+load_file("nload.hoc")
+

@@ -1,0 +1,42 @@
+// $Id: condisconcellfig.hoc,v 1.1 2010/10/10 18:04:08 samn Exp $ 
+
+
+// draw panels for condisconcellfig.hoc
+
+if(!name_declared("nqbatch")) rcsopen("load.hoc",87)
+
+if(g==nil) gg()
+
+declare("nqf","o[2]","sidx",0,"nqfs","o[2]","winsz",201,"stdg",0.5)
+
+nqf[0]=new NQS("/u/samn/intfcol/data/10oct10.10sep25.02_discon_all_cells__nqpmtm_intraE_I_C.nqs")
+nqf[1]=nqbatch.get("nqpmtm",1).o // disconnected columns (but connected cells)
+
+for sidx=0,1 {nqfs[sidx]=new NQS()  nqfs[sidx].cp(nqf[sidx])}
+
+//* myfilt(code,vec) - code:0=gauss,1=triangle,2=box
+proc myfilt () { local a localobj vx
+  if($1==0) {
+    a=allocvecs(vx)
+    vx.indgen(-3,3,.03)
+    gaussfilt($o2,stdg,vx)
+  } else if($1==1) {
+    triangfilt($o2,winsz)
+  } else if($1==2) {
+    boxfilt($o2,winsz)
+  }
+}
+
+//* drit(code,filt)
+proc drit () { local i,j,cc localobj lc
+  {lc=new List() lc.append(new String("C%dintraE")) lc.append(new String("C%dintraI"))}
+  if($1>=0 && $1<=1) {
+    for i=0,1 for j=0,numcols-1 {
+      sprint(tstr,lc.o($1).s,j)
+      cc=nqfs[i].fi(tstr)
+      nqfs[i].v[cc].copy(nqf[i].v[cc])
+      myfilt($2,nqfs[i].v[cc])
+      nqfs[i].gr(tstr,"f",0,i+1,1)
+    }
+  }
+}

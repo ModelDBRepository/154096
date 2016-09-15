@@ -1,0 +1,56 @@
+// $Id: batch.hoc,v 1.124 2012/01/06 02:27:50 samn Exp $ 
+
+// run this one with :
+// pbsb -s -ng -n 8 -i batch.hoc
+
+// @tauahpRS = (12.5,25,50,100,200,400,800,1600)
+
+///
+//* setup
+xopen("/usr/site/nrniv/simctrl/hoc/setup.hoc")
+xopen("/usr/site/nrniv/simctrl/hoc/nrnoc.hoc")
+load_file("init.hoc")
+
+//* batch/logging related
+batch_flag=1
+
+strdef logstr
+objref bfile
+bfile=new File()
+proc logit () {
+  bfile.aopen("/u/samn/intfzip/data/12jan05.02_batch_tauahpRS_TEST_A_.txt")
+  {bfile.printf($s1)  bfile.printf("\n") bfile.close()}
+}
+
+//* load correct version of sim
+
+strdef strrcs
+strrcs="nqsnet.hoc,65,network.hoc,204,params.hoc,273,run.hoc,66,nload.hoc,202,basestdp.hoc,222"
+rcsopen(strrcs)
+
+sprint(strv,"12jan05.02_tauahpRS_%g_",tauahpRS)
+print "sim version: " , strv
+
+logit(strv) // write info to log
+
+//* post-sim-load modifications
+
+//* load data from sim that was already run
+// mytstop=tstop=htmax=10e3 // set to correct duration of sim that was run
+// loadminrundat(strv)
+
+//myrd(strv)
+
+//* run & save output
+//** main run/save
+// minrunsv(0,0) 
+myrunsv(strv)
+// myrd(strv)
+// rcsopen("nqpplug.hoc",6) // loads & saves mkdrs results
+
+// savenqspec(strv)
+// {wgnq=mkwgnq(col) sprint(tstr,"/u/samn/intfzip/data/%s_wgnq.nqs",strv) wgnq.sv(tstr)}
+
+//* finish logging current run
+ print strv
+// {pravgrates(tstop,1,tstr) logstr=strv strcat(logstr,tstr) logit(logstr)}

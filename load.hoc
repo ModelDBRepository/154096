@@ -1,0 +1,99 @@
+// $Id: load.hoc,v 1.163 2012/01/06 02:52:33 samn Exp $
+
+//* init
+
+strdef strrcs
+strrcs="nqsnet.hoc,65,network.hoc,204,params.hoc,273,run.hoc,66,nload.hoc,202,basestdp.hoc,222"
+rcsopen(strrcs)
+
+{vec.resize(0) vec.append(12.5,25,50,100,200,400,800,1600)}
+objref nqr // load some data from batch.hoc124
+{nqsdel(nqr) nqr=new NQS("t","ty","pkx","pky","nqp","tauahpRS") nqr.odec("nqp")}
+{tauahpRS=400 dur=10 ct=CTYPi}
+for vtr(&tauahpRS,vec) {
+  sprint(strv,"12jan05.02_tauahpRS_%g_",tauahpRS)
+  print strv
+  sprint(tstr,"/u/samn/intfzip/data/%s_snq.nqs",strv)
+  if(!FileExists(tstr)) {
+    print "WARN: sim " , strv, " not found."
+    continue
+  }
+  myrd(strv)
+  initAllMyNQs()
+  k=0
+  for case(&ct,E2,I2,CTYPi) for (j=0;j<100;j+=dur) {
+    vec0.copy(nqCTY.v[ct],j*1e3/binsz,(j+dur)*1e3/binsz-1)
+    vec0.sub(vec0.mean)
+    nqp=getspecnq(vec0,1e3/binsz,SPECTY,PRESM)
+    pkx = nqp.v.x(nqp.v[1].max_ind)
+    pky = nqp.v[1].max
+    nqr.append((j+dur/2)*1e3,ct,pkx,pky,nqp,tauahpRS)
+    k+=1
+  }    
+}
+
+nqr.resize("theta","alpha","beta","gamma")
+nqr.pad()
+double dmin[4],dmax[4]
+{dmin[0]=2 dmax[0]=5 dmin[1]=8 dmax[1]=12 dmin[2]=15 dmax[2]=25 dmin[3]=35 dmax[3]=50}
+for i=0,nqr.v.size-1 {
+  nqp = nqr.get("nqp",i).o
+  nqp.verbose=0
+  for j=0,3 if(nqp.select("f",">=",dmin[j],"f","<=",dmax[j])) {
+    nqr.v[nqr.m-4+j].x(i) = nqp.getcol("pow").sum() / (1+dmax[j]-dmin[j])
+  }
+  nqp.tog("DB")
+  nqp.verbose=1
+}
+
+
+if(0) {
+  ct=E2
+  nqr.verbose=0
+  for vtr(&tauahpRS,vec,&i) if(nqr.select("tauahpRS",tauahpRS,"ty",ct)) {
+    for j=nqr.m-4,nqr.m-1 nqr.gr(nqr.s[j].s,"t",0,1+j%4,i+2)
+  }
+  nqr.verbose=1
+}
+
+nqr.resize("x1","x2","x3","x4")
+nqr.pad()
+j=0
+for i=nqr.m-4,nqr.m-1 {  
+  {minx=(j+1)*3 maxx=minx+2 rdm.uniform(minx,maxx)}
+  nqr.v[i].setrand(rdm)
+  j+=1
+}
+
+objref myva[10],myve[10],vx[10]
+for i=0,9 {
+  myva[i]=new Vector()
+  myve[i]=new Vector()
+  vx[i]=new Vector()
+  vx[i].append(4,7,10,13)
+}
+{ct=E2 gvmarkflag=1 nqr.verbose=0 if(g==nil) gg()}
+for vtr(&tauahpRS,vec,&i) if(nqr.select("tauahpRS",tauahpRS,"ty",ct)) {
+  g.color(i+1)
+  myva[i].append(nqr.getcol("theta").mean())
+  myve[i].append(nqr.getcol("theta").stderr())
+  nqr.gr("theta","x1",0,i+1,8)
+
+  myva[i].append(nqr.getcol("alpha").mean())
+  myve[i].append(nqr.getcol("alpha").stderr())
+  nqr.gr("alpha","x2",0,i+1,8)
+
+  myva[i].append(nqr.getcol("beta").mean())
+  myve[i].append(nqr.getcol("beta").stderr())
+  nqr.gr("beta","x3",0,i+1,8)
+
+  myva[i].append(nqr.getcol("gamma").mean())
+  myve[i].append(nqr.getcol("gamma").stderr())
+  nqr.gr("gamma","x4",0,i+1,8)
+
+  vx[i].add(-1 + i*2/6)
+  myva[i].mark(g,vx[i],"O",8,i+1)
+  myva[i].ploterr(g,vx[i],myve[i],15,i+1,4)
+}
+nqr.verbose=1
+

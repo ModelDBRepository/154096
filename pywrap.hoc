@@ -1,0 +1,144 @@
+// $Id: pywrap.hoc,v 1.12 2011/03/21 21:34:16 samn Exp $ 
+
+//* variables
+declare("INITPYWRAP",0) // whether initialized properly
+
+//* initialize pywrap
+if(2!=name_declared("p")) {
+  print "pywrap.hoc: loading python.hoc"
+  load_file("python.hoc")
+}
+func initpywrap () { localobj pjnk
+  INITPYWRAP=0
+  if(2!=name_declared("p")){printf("initpywrap ERR0A: PythonObject p not found in python.hoc!\n") return 0}
+  print p  
+  pjnk=new PythonObject()
+  if(!isojt(p,pjnk)){printf("initpywrap ERR0B: PythonObject p not found in python.hoc!\n")}
+  INITPYWRAP=1
+  return 1
+}
+initpywrap()
+
+//** pypmtm(vec,samplingrate)
+// this function calls python version of pmtm, runs multitaper power spectra, returns an nqs
+obfunc pypmtm () { local sampr,spc localobj vin,str,nqp,ptmp
+  if(!INITPYWRAP) {printf("pypmtm ERR0A: python.hoc not initialized properly\n") return nil}
+  if(!nrnpython("from mtspec import *")) {printf("pypmtm ERR0B: could not import mtspec python library!\n") return nil}  
+  if(numarg()==0) {printf("pypmtm(vec,samplingrate)\n") return nil}
+  vin=$o1 sampr=$2 str=new String()
+  p.vjnk = vin.to_python()
+  p.vjnk = p.numpy.array(p.vjnk)
+  spc = 1.0 / sampr // "spacing"
+  sprint(str.s,"[Pxx,w]=mtspec(vjnk,%g,4)",spc)
+  nrnpython(str.s)
+  nqp=new NQS("f","pow")
+  nqp.v.from_python(p.w)
+  nqp.v[1].from_python(p.Pxx)
+  return nqp
+}
+
+//** pybspow(vec,samplingrate[,maxf,pord])
+// this function calls python version of bsmart, to get power pectrum, returns an nqs
+// pord is order of polynomial -- higher == less smoothing. default is 12
+obfunc pybspow () { local sampr,pord,maxf localobj vin,str,nqp,ptmp
+  if(!INITPYWRAP) {printf("pybspow ERR0A: python.hoc not initialized properly\n") return nil}
+  if(!nrnpython("from bsmart import bspow")) {printf("pybspow ERR0B: could not import bsmart python library!\n") return nil}  
+  if(numarg()==0) {printf("pybspow(vec,samplingrate)\n") return nil}
+  vin=$o1 sampr=$2 str=new String()
+  if(numarg()>2) maxf=$3 else maxf=sampr/2
+  if(numarg()>3) pord=$4 else pord=12
+  p.vjnk = vin.to_python()
+  p.vjnk = p.numpy.array(p.vjnk)
+  sprint(str.s,"Pxx=bspow(vjnk,%g,%g,p=%d)",sampr,maxf,pord)
+  nrnpython(str.s)
+  nqp=new NQS("f","pow")
+  nqp.v.indgen(0,maxf,1)
+  nqp.v[1].from_python(p.Pxx)
+  return nqp
+}
+
+//** pyspecgram(vec,samplingrate[,orows])
+// this function calls python version of specgram, returns an nqs
+obfunc pyspecgram () { local sampr,spc,i,j,sz,f,tt,orows,a localobj vin,str,nqp,ptmp,vtmp
+  if(!INITPYWRAP) {printf("pyspecgram ERR0A: python.hoc not initialized properly\n") return nil}
+  if(!nrnpython("from matplotlib.mlab import specgram")) {printf("pyspecgram ERR0B: could not import specgram from matplotlib.mlab!\n") return nil}  
+  if(numarg()==0) {printf("pyspecgram(vec,samplingrate)\n") return nil}
+  a=allocvecs(vtmp)
+  vin=$o1 sampr=$2 str=new String()
+  if(numarg()>2)orows=$3 else orows=1
+  p.vjnk = vin.to_python()
+  p.vjnk = p.numpy.array(p.vjnk)
+  sprint(str.s,"[Pxx,freqs,tt]=specgram(vjnk,Fs=%g)",sampr)
+  nrnpython(str.s)
+  if(orows) {
+    {nqp=new NQS("f","pow") nqp.odec("pow")}
+    {sz=p.Pxx.shape[0] nqp.clear(sz)}
+    for i=0,sz-1 {
+      {vtmp.resize(0) vtmp.from_python(p.Pxx[i]) f=p.freqs[i]}
+      nqp.append(f,vtmp)
+    }
+  } else {
+    nqp=new NQS("f","pow","t")
+    sz = p.Pxx.shape[0]
+    nqp.clear(sz * p.Pxx.shape[1])
+    for i=0,sz-1 {
+      {vtmp.resize(0) vtmp.from_python(p.Pxx[i]) f=p.freqs[i]}
+      for j=0,vtmp.size-1 nqp.append(f,vtmp.x(j),p.tt[j])
+    }
+  }
+  dealloc(a)
+  return nqp
+}
+
+//** pycsd(vec1,vec2,samplingrate)
+// this function calls python version of csd (cross-spectral density)
+// returns an nqs with csd -- csd is non-directional
+obfunc pycsd () { local sampr,a localobj v1,v2,str,nqp
+  if(!INITPYWRAP) {printf("pycsd ERR0A: python.hoc not initialized properly\n") return nil}
+  if(!nrnpython("from matplotlib.mlab import csd")) {printf("pycsd ERR0B: could not import csd from matplotlib.mlab!\n") return nil}  
+  if(numarg()==0) {printf("pycsd(vec,samplingrate)\n") return nil}
+  v1=$o1 v2=$o2 sampr=$3 str=new String()
+  {p.vjnk1=v1.to_python() p.vjnk1=p.numpy.array(p.vjnk1)}
+  {p.vjnk2=v2.to_python() p.vjnk2=p.numpy.array(p.vjnk2)}
+  sprint(str.s,"[Pxy,freqs]=csd(vjnk1,vjnk2,Fs=%g)",sampr)
+  nrnpython(str.s)
+  nqp=new NQS("f","pow")
+  nqp.v[0].from_python(p.freqs)
+  nqp.v[1].from_python(p.Pxy)
+  return nqp
+}
+
+//** pypsd(vec,samplingrate)
+// this function calls python version of psd (power-spectral density)
+// returns an nqs with psd
+obfunc pypsd () { local sampr localobj v1,str,nqp
+  if(!INITPYWRAP) {printf("pypsd ERR0A: python.hoc not initialized properly\n") return nil}
+  if(!nrnpython("from matplotlib.mlab import psd")) {printf("pypsd ERR0B: could not import psd from matplotlib.mlab!\n") return nil}  
+  if(numarg()==0) {printf("pypsd(vec,samplingrate)\n") return nil}
+  v1=$o1 sampr=$2 str=new String()
+  {p.vjnk1=v1.to_python() p.vjnk1=p.numpy.array(p.vjnk1)}
+  sprint(str.s,"[Pxx,freqs]=psd(vjnk1,Fs=%g)",sampr)
+  nrnpython(str.s)
+  nqp=new NQS("f","pow")
+  nqp.v[0].from_python(p.freqs)
+  nqp.v[1].from_python(p.Pxx)
+  return nqp
+}
+
+//** pycohere(vec1,vec2,samplingrate) 
+// this function calls python version of cohere (coherence is normalized csd btwn vec1, vec2)
+// returns an nqs with coherence
+obfunc pycohere () { local sampr,a localobj v1,v2,str,nqp
+  if(!INITPYWRAP) {printf("pycohere ERR0A: python.hoc not initialized properly\n") return nil}
+  if(!nrnpython("from matplotlib.mlab import cohere")) {printf("pycohere ERR0B: could not import cohere from matplotlib.mlab!\n") return nil}  
+  if(numarg()==0) {printf("pycohere(vec1,vec2,samplingrate)\n") return nil}
+  v1=$o1 v2=$o2 sampr=$3 str=new String()
+  {p.vjnk1=v1.to_python() p.vjnk1=p.numpy.array(p.vjnk1)}
+  {p.vjnk2=v2.to_python() p.vjnk2=p.numpy.array(p.vjnk2)}
+  sprint(str.s,"[Pxy,freqs]=cohere(vjnk1,vjnk2,Fs=%g)",sampr)
+  nrnpython(str.s)
+  nqp=new NQS("f","coh")
+  nqp.v[0].from_python(p.freqs)
+  nqp.v[1].from_python(p.Pxy)
+  return nqp
+}

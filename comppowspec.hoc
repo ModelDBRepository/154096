@@ -1,0 +1,120 @@
+// $Id: comppowspec.hoc,v 1.11 2011/02/22 21:02:34 samn Exp $ 
+
+
+// performs comparisons of experimental to simulation power spectra
+
+{colW=colH=3 mytstop=1e3}
+
+//strdef strrcs
+//strrcs="nqsnet.hoc,65,network.hoc,125,params.hoc,112,run.hoc,53,nload.hoc,182"
+//rcsopen(strrcs) // load sim from RCS
+
+mytstop=htmax=tstop=20e3
+
+rcsopen("load.hoc",88)
+
+if(g==nil)gg()
+
+objref nqe // experimental data power spectra
+nqe=new NQS("/u/samn/ibohk/data/10sep24_sal-j6-0611-2.bpf_matfftpow_smooth.nqs")
+//nqe=new NQS("/u/samn/ibohk/data/10sep24_sal-j6-0611-2.bpf_matfftpow_raw.nqs")
+
+declare("sixcut",0) // do a six Hz cutoff
+
+objref nqe2
+nqe2=new NQS()
+nqe.select("f","<=",100) // 209716
+nqe2.cp(nqe.out) 
+
+objref nqe2rs // resample power spectra to have same size as nqf200 (or nqpmtm)
+strdef strpow
+strpow="nqf200"
+proc mknqe2rs () {
+  {nqsdel(nqe2rs) nqe2rs=new NQS("f","pow")}
+  if(!strcmp(strpow,"nqf200")) nsz=2048 else nsz=2049
+  for i=0,1 { // do the resampling
+    nqe2rs.v[i].copy(nqe2.v[i])
+    resample(nqe2rs.v[i],nsz)
+  }  
+  mx=nqe2rs.v[1].max // peak amplitude in experimental data
+}
+
+objref nqn,vfctr
+{vfctr=new Vector() vfctr.indgen(0.05,1,0.05)}
+
+fctr=1
+
+//* mknqn - make an nqs with error to find optimal matches
+proc mknqn () { local sc
+  {mknqe2rs() nqsdel(nqn) nqn=new NQS("sidx","SIMTYP","col","err","fctr","DISCONCOL")}
+  for i=0,nqbatch.v.size-1 {
+    print i
+    nq=nqbatch.get(strpow,i).o
+    sidx=nqbatch.get("sidx",i).x
+    SIMTYP=nqbatch.get("SIMTYP",i).x
+    DISCONCOL=nqbatch.get("DISCONCOL",i).x
+    for j=0,numcols-1 {
+      {sprint(tstr,"C%dintraE",j) vec.resize(0) vec.copy(nq.v[nq.fi(tstr)])}
+
+      if(sixcut) vec.fill(0,0,62*2)
+      if(!strcmp(strpow,"nqpmtm")) boxfilt(vec,201)
+
+      for vtr(&fctr,vfctr) {
+        vec0.copy(vec)
+        if(sixcut) vec0.fill(0,0,62)
+        if(mx>vec0.max) sc=fctr*mx/vec0.max else sc=fctr*vec0.max/mx
+        vec0.mul(sc)
+        nqn.append(sidx,SIMTYP,j,vec0.meansqerr(nqe2rs.v[1]),fctr,DISCONCOL)
+      }
+    }
+  }
+}
+
+objref myv[5]
+//* drit(exclude disconcol) - draw the best matches
+proc drit () { local skipdiscon
+  if(numarg()>0)skipdiscon=$1 else skipdiscon=1
+  nqe2.gr("pow","f",0,1,1)  
+  for case(&SIMTYP,0,18,20,-18,&i) {
+    myv[i]=new Vector()
+    if(skipdiscon) nqn.select("SIMTYP",SIMTYP) else nqn.select("SIMTYP",SIMTYP,"DISCONCOL",0)
+    err=nqn.getcol("err").min
+    nqn.select("SIMTYP",SIMTYP,"err",err)
+    nq=nqbatch.get(strpow,nqn.fetch("sidx")).o
+    vec.resize(0)
+    sprint(tstr,"C%dintraE",nqn.fetch("col"))
+    vec.copy(nq.v[nq.fi(tstr)])
+    fctr=nqn.fetch("fctr")
+    if(sixcut) vec.fill(0,0,62*2)
+    if(!strcmp(strpow,"nqpmtm")) boxfilt(vec,201)
+    {myv[i].copy(vec) myv[i].mul(fctr*mx/myv[i].max)}  
+    myv[i].plot(g,nq.v,i+2,1)
+    print SIMTYP,err
+  }
+}
+
+//* drbad(exclude disconcol) - draw the worst matches
+proc drbad () { local skipdiscon,idx
+  if(numarg()>0)skipdiscon=$1 else skipdiscon=1
+  nqe2.gr("pow","f",0,1,1)  
+  for case(&SIMTYP,0,18,20,-18,&i) {
+    myv[i]=new Vector()
+    if(skipdiscon) nqn.select("SIMTYP",SIMTYP) else nqn.select("SIMTYP",SIMTYP,"DISCONCOL",0)
+    err=nqn.getcol("err").max
+    
+    nqn.select("SIMTYP",SIMTYP,"err",err)
+//    print nqn.select("SIMTYP",SIMTYP,"err",">=",err*.9)
+//    for vtr(&idx,nq
+    nq=nqbatch.get(strpow,nqn.fetch("sidx")).o
+    vec.resize(0)
+    sprint(tstr,"C%dintraE",nqn.fetch("col"))
+    vec.copy(nq.v[nq.fi(tstr)])
+    fctr=nqn.fetch("fctr")
+    if(sixcut) vec.fill(0,0,62*2)
+    if(!strcmp(strpow,"nqpmtm")) boxfilt(vec,201)
+    {myv[i].copy(vec) myv[i].mul(fctr*mx/myv[i].max)}  
+    myv[i].plot(g,nq.v,i+2,1)
+    print SIMTYP,err
+  }
+}
+

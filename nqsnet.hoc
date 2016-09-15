@@ -1,0 +1,63 @@
+// $Id: nqsnet.hoc,v 1.65 2010/09/07 18:56:17 samn Exp $
+// xopen("nqsnet.hoc")
+
+//      pre-id  post-id  pre#  post#   distance weight  syn-id   nc ptr  wt1 (eg AMPA+NMDA)
+objref nq[2],sq[CTYPi][CTYPi],cp
+obfunc mkcp0 () { localobj lo
+  lo = new NQS("PRID","POID","STYP","PIJ","DIV","CONV","NSYN","NPRE")
+  lo.useslist("PRID",CTYP) lo.useslist("POID",CTYP) lo.useslist("STYP",STYP)
+  return lo
+}
+
+// CODE: PRID,POID,INCOL,COL1,COL2
+obfunc mksp () { localobj lo
+  lo=new NQS("CODE","PR","PO","DEL","WT0","WT1") // CODE==PRID(1),POID(2),COLA(3),COLB(4)
+  lo.coddec("CODE")
+  // lo.useslist("PRID",CTYP) lo.useslist("POID",CTYP) 
+  return lo
+}
+sp=mksp()
+
+//* Numbers and connectivity params
+
+// layer return layer location with 'sublayer' defined by Inhib (+0.5) or other suffix
+// E or I should be 1st letter of name, suffix letter will ideally dichotomize into late
+// alphabet or early alphabet
+func layer () { local x,in,la
+  la=0
+  if (sscanf(CTYP.o($1).s,"%c%d%c",&in,&x,&la)<2) return -1
+  if (x==23) x=3 // layer 2/3
+  if (in==73) x+=0.5 // ascii 73 is 'I'
+  if (la>77) x+=0.2 // <='M'
+  return x
+}
+
+//* routines
+//** styp() sets synapse type based on presynaptic cell
+func styp () { local pr,po
+  pr=$1 po=$2
+  if (pr==IN && po==IN) { return GA 
+  } else if (pr==IN) { return IX
+  } else if (pr==SU || pr==DP) { return EX
+  } else if (pr==SM) { return AM
+  } else if (strm(CTYP.o[pr].s,"^E")) { return EX
+  } else if (strm(CTYP.o[pr].s,"^I")) { return IX
+  } else printf("styp ERR %s->%s not classified",CTYP.object(pr).s,CTYP.object(po).s)
+}
+
+//** ellfld() place the cells inside an ellipse
+// r for an ellipse = a*b/sqrt((a*sin(theta))^2 + (b*cos(theta))^2)
+proc ellfld () { local a,b,ii,jj,p,seed localobj xv,yv,xo
+  seed=239023229
+  a=1 b=2
+  p=allocvecs(xv,yv) vrsz(allcells*10,xv,yv)
+  xv.setrnd(4,2*a,seed) yv.setrnd(4,2*b) xv.sub(a) yv.sub(b)
+  jj=0
+  for vtr2(&x,&y,xv,yv,&ii) {
+    if (a*x^2+b*y^2<1) { ce.o(jj).xloc=x ce.o(jj).yloc=y jj+=1 }
+    if (jj==ce.count) break
+  }
+  print ii,jj
+  if (jj!=ce.count) print "Not filled"
+  dealloc(p)
+}

@@ -1,0 +1,28 @@
+// $Id: graphplug.hoc,v 1.2 2010/09/26 23:02:45 samn Exp $ 
+
+// "plugin" (for batch.hoc) to create/save GraphNQ
+
+//** save graph-theoretic properties of all cells
+objref nqg
+nqg=GraphNQ()
+{nqg.resize("hub") nqg.pad()}
+if(SIMTYP>0) { // vhubid[...] only setup for HUB-based sims
+  for i=0,numcols-1 { // add id for hubs
+    for vtr(&j,vhubid[i]) if(nqg.select(-1,"col",i,"id",j)) nqg.v[nqg.m-1].x(nqg.ind.x(0))=1
+  }
+}
+{nqg.resize("freq") nqg.pad()}// frequency
+for i=0,numcols-1 {
+  {nqsdel(snq[i]) snq[i]=SpikeNQS(vit[i].tvec,vit[i].vec,lcol.o(i))}
+  {nqsdel(fnq[i]) fnq[i]=FreqNQS(snq[i],lcol.o(i))}
+  for j=0,col[i].allcells-1 { gid=col[i].ce.o(j).gid
+    if(fnq[i].select(-1,"gid",gid)) { 
+      hz = fnq[i].v[fnq[i].m-1].x(fnq[i].ind.x(0))
+      nqg.v[nqg.m-1].x(gid) = hz
+    }
+  }
+  {nqsdel(snq[i]) nqsdel(fnq[i])}
+}
+{sprint(tstr,"/u/samn/intfcol/data/%s_graph.nqs",strv) nqg.sv(tstr)}
+if(FileExists(tstr)) print "saved GraphNQ to ", tstr else print "couldn't save GraphNQ to ", tstr , "!!!!!!"
+

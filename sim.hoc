@@ -1,0 +1,28 @@
+// $Id: sim.hoc,v 1.3 2012/03/16 16:25:32 samn Exp $ 
+
+//* setup - this stuff is normally loaded with M-x run-neuron (emacs command)
+xopen("setup.hoc")
+xopen("nrnoc.hoc")
+load_file("init.hoc")
+
+xopen("geom.hoc") // this is loaded with C-x C-l (emacs command)
+
+//* a few parameters
+
+//mytstop = 10e3 // set the simulation duration (in milliseconds)
+//mytstop is set in params.hoc:26 as a function of LearnDur+ZipDur+PreDur+PostDur
+
+//* this is the sim load command: C-x l (emacs command)
+
+load_file("nqsnet.hoc")
+load_file("network.hoc")
+load_file("params.hoc")
+load_file("run.hoc")
+//load_file("nload.hoc")
+
+load_file("alz.hoc") // Load Alzheimer's testing code
+
+run() // run the simulation
+// pravgrates() // <<-- prints average firing rates
+// ap() // displays a GUI with some of the recoded spikes and cell voltages
+

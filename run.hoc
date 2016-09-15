@@ -1,0 +1,292 @@
+// $Id: run.hoc,v 1.66 2011/12/28 22:14:56 samn Exp $
+print "Loading run.hoc..."
+objref wf1,wf2,wrec
+sprint(tstr,"o[%d]",numcols)
+declare("vit",tstr,"nqLFP",tstr,"SPKSZ",20000e3)
+//declare("vit",tstr,"nqLFP",tstr,"SPKSZ",12e3)
+ // {wf1=new File() wf2=new File()}
+// wrec = new NQS("time","ID","SYN","WT")
+// wrec.zvec(2e7) // make big enough?
+
+method("local") // why was this being used?
+method("global")
+cvode.atol(1e-3) 
+cvode.condition_order(1) // irrelevant to acells?
+declare("sepflds",0) // whether to record separate fields for each layer
+
+// rv2 is part of grvec.hoc, as a stub, so it can be
+// customized to do something to vector before graphing it
+proc rv2 () { }
+
+//** draw lines between cell subpopulations
+proc rasterlines () { localobj o
+  g=graphItem
+  for ct=0,CTYPi-1 if(col.numc[ct]) {
+    drline(0,col.ixe[ct],mytstop,col.ixe[ct],g,2,6)
+    // o=mdl2view(g,0,ix[ii]+numc[ii]/10)
+    o=mdl2view(g,0.9,col.ix[ct]+col.numc[ct]/4)
+    g.label(0.9,o.x[3],CTYP.o(ct).s)
+  }
+  g.flush
+}
+//** calls rasterlines, making sure g is set first
+proc grlines () { 
+  {g=Graph[$1] rasterlines()}
+}
+
+proc a () { local sh,sv
+  if(g==nil)gg()
+  if (!isobj(aa,"Graph")) aa=g else g=aa
+  if (aa.view_count==0) aa=g
+  sv=gnum gnum=ojtnum(g)
+  graphItem=g
+  sh=0 grv_.super=1 g.erase_all
+  grv_.gveraseflag=0  grv_.gvmarkflag=grv_.super=1 // gnum=0
+  gv(0,1+sh,2) // gv(1,3+sh,2) gv(2,2+sh,2)
+  grv_.gvmarkflag=grv_.super=0
+  gnum=sv
+  rasterlines()
+}
+proc b () { rewt() time() a() }
+
+//** init - called @ start of run
+proc init () { 
+  initMisc1()
+  vseed_stats(392426)
+  finitialize() 
+  cvode.re_init()
+}
+
+//** initrr - for doing a rerun - not used right now
+proc initrr () { 
+  rewt()
+  col.intf.global_init()
+  NStim[0].global_init()
+  vseed_stats(392426)
+}
+
+//** setMemb - nothing here
+proc setMemb () {}
+
+//** initMisc1
+proc initMisc1 () { local i
+  col.intf.global_init()
+  for i=0,numcols-1 col[i].cstim.initrands()
+}
+
+objref ww // global ww for post processing
+{wwht_INTF6=1 wwwid_INTF6=100}
+//** wrecon - setup LFP recording, one LFP for each COLUMN
+proc wrecon () { local cdx,ii,x,ct,cnt localobj tl,vm
+  tl=new List()
+  for cdx=0,numcols-1 {
+    nqsdel(nqLFP[cdx])
+    if(sepflds) nqLFP[cdx]=new NQS("E2","E4","E5","E6","LFP") else {nqLFP[cdx]=new NQS(1) nqLFP[cdx].s[0].s="LFP"}
+    {nqLFP[cdx].v.resize(tstop/vdt_INTF6) nqLFP[cdx].pad()}
+    for ii=0,nqLFP[cdx].m-1 tl.append(nqLFP[cdx].v[ii])
+  }
+  {vm=new Vector(CTYPi) vm.x(E2)=0 vm.x(E4)=1 vm.x(E5R)=vm.x(E5B)=2 vm.x(E6)=3}
+  col.intf.initwrec(tl)
+  for x=0,numcols-1 {
+    for case(&ct,E2,E4,E5R,E5B,E6) {
+      for ii=col[x].ix[ct],col[x].ixe[ct] {
+        if(sepflds) {
+          col[x].ce.o(ii).wrc(vm.x(ct)+x*5)
+          col[x].ce.o(ii).wrc(4+x*5)
+        } else col[x].ce.o(ii).wrc(x)
+      }
+    }
+  }
+}
+
+//** wrecoff - turn off LFP recording
+proc wrecoff () { local ct
+  for ctt(&ct) for ixt(ct) XO.wrec(0)
+}
+
+//** finishMisc - called @ end of run()
+func finishMisc () { local ii localobj co
+  for ltr(XO,printlist) if (isassigned(XO.o)) if (XO.o.fflag) XO.o.fini
+  // if(0) panobj.pvplist(ofile,params,100) //dont save printlist for now
+  col.intf.global_fini
+  for ltr(co,lcol) co.intf.spkstats2(1)
+  print "TMAX: ",tmax_INTF6
+  return 1
+}
+
+//** snapsv() save after printlist items min-max to fixed dt
+proc snapsv () { local a,vdt,min,max localobj v1,o
+  grv_.bst(3,3)
+  vdt=0.2 
+  a=allocvecs(v1)
+  v1.resize(tstop/vdt)
+  for ltr(o,printlist) { 
+    if (o.code!=3) continue
+    v1.snap(o.vec,o.tvec,vdt)
+    o.vec.copy(v1)
+    o.pstep=vdt
+    o.tvflag=0
+  }
+  if (numarg()==0) grv_.pvall()
+  dealloc(a)
+}
+
+proc exeruncall () { for ltr(XO,printlist) if (XO.code==3) XO.tvflag=1 }
+proc pvout2 () { snapsv(1) }
+
+//printlist=new List()
+if(printlist==nil)printlist=new List()
+proc prlclr () { localobj ce,col,intf
+  for ltr(XO,printlist) {
+    if (isassigned(XO.o)) if (XO.o.fflag) XO.o.recclr
+  }
+  //  for ltr(XO,ce) XO.wrc(-1)
+  for ltr(col,lcol) {
+    {ce=col.ce intf=ce.o(0)}
+    for ii=0,ce.count-1 ce.o(ii).wrc(-1)
+    intf.wwfree(0)
+  }
+  printlist.remove_all
+}
+
+//** prl(recv,recs[,lvextra]) - setup recording in printlist
+//$1  = whether to record any cell voltages, default off
+//$2  = whether to record spike times, default on
+//$o3 = extra cells to record. lv.o(0)=cell,lv.o(1)=param to record,etc.,optional
+proc prl () { local a,x,cidx,ii,jj,offst,y,recv,recs,max localobj xo,lvextra,co,ce
+  if(numarg()>0) recv=$1 else recv=0
+  if(numarg()>1) recs=$2 else recs=1
+  if(numarg()>2) lvextra=$o3 else lvextra=nil
+  {offst=0 prlclr()}
+  for ltr(co,lcol,&ii) {
+    {ce=co.ce intf=co.intf}
+    if (recs) { sprint(tstr,"%s_SPKS",co.name)
+      if (intf.flag("jcn")) { // for use with jitcon()
+        printlist.append((vit[ii]=new vitem(tstr,SPKSZ,1)))
+        intf.jitrec(vit[ii].vec,vit[ii].tvec)
+      } else {
+        intf.jitrec() // clear jit recording
+        for ltr(xo,ce,&y) {
+          if (y==0) vit[ii]=new_printlist_nc(xo, xo.id, tstr) else {
+            new_printlist_nc2(vit[ii], xo, xo.id)        }
+        }
+      }
+    }
+    npacsz=20
+    if (recv && ce.count>0) for x=0,CTYPi-1 {
+      if (co.numc[x]>2) max=2 else max=co.numc[x]-1
+      for jj=0,max {
+        XO=ce.object(co.ix[x]+jj)
+        XO.recclr
+        new_printlist_ac(XO,"V",  CTYP.o(x).s,XO.id)
+        // new_printlist_ac(XO,"VGB",  CTYP.o(x).s,XO.id)
+        // new_printlist_ac(XO,"VGA",  CTYP.o(x).s,XO.id)
+        // new_printlist_ac(XO,"VGA2",  CTYP.o(x).s,XO.id)
+        // new_printlist_ac(XO,"VAM2",  CTYP.o(x).s,XO.id)
+        // new_printlist_ac(XO,"AHP",  CTYP.o(x).s,XO.id)
+        //      printlist.o(printlist.count-1).code=3 // use code 3 for snapping
+        // XO=ce.object(ixe[x]-jj-1)
+        // XO.recclr
+        // new_printlist_ac(XO,"V",  CTYP.object(x).s,XO.id)
+      }
+    }
+    if(lvextra!=nil){
+      for(jj=0;jj<lvextra.count;jj+=2){ XO=lvextra.o(jj)
+        new_printlist_ac(XO,lvextra.o(jj+1).s,CTYP.object(ctyp(XO.id)).s,XO.id)
+      }
+    }
+  }
+  if (use_nqLFP) {
+    wrecon()
+  }
+}
+ 
+flddur=celdur=1000
+splshhsz=0.4
+objref slicepictypes
+slicepictypes=new Vector()
+slicepictypes.append(0,3,2)
+stopoq_INTF6=1
+
+proc rer () { 
+  intf.resetall
+  prl()
+  shock()
+  srun()
+}
+
+proc turnoff () { local cel0,cel1,off
+  cel0=$1 cel1=$2
+  if (argtype(3)==0) off=$3 else off=0
+  ind.indgen(ix[cel0],ixe[cel0],1) vec.indgen(ix[cel1],ixe[cel1],1) 
+  intf.turnoff(ind,vec,off)
+}
+
+//** turn off intralaminar connections
+proc intralamoff () { local ct
+  for ctt(&ct) if(numc[ct] && div[ct][ct][0]) turnoff(ct,ct)
+}
+
+//** turn on intralaminar connections
+proc intralamon () { local ct
+  for ctt(&ct) if(numc[ct] && div[ct][ct][0]) turnoff(ct,ct,1)
+}
+
+load_file("spkts.hoc")
+objref snq,fnq,anq,cvnq
+//get CVPNQS
+proc getcvnq () {
+  if(cvnq!=nil)nqsdel(cvnq)
+  if(numarg()==0) cvnq=CVPNQS(snq,1,1,0)
+  if(numarg()==1) cvnq=CVPNQS(snq,$1,1,0)
+  if(numarg()==2) cvnq=CVPNQS(snq,$1,$2,0)
+  if(numarg()==3) cvnq=CVPNQS(snq,$1,$2,$3)
+}
+//get PActNQS
+proc getanq () {
+  if(anq!=nil)nqsdel(anq)
+  if(numarg()==0) {
+    anq=PActNQS(snq)
+  } else if(numarg()==1) {
+    anq=PActNQS(snq,$1) 
+  } else if(numarg()==2) {
+    anq=PActNQS(snq,$1,$2) 
+  }
+}
+//get SpikeNQS
+proc getsnq () {
+  if(snq!=nil)nqsdel(snq)
+  snq=SpikeNQS(printlist.o(0),0)
+}
+//get SpikeNQS,FreqNQS
+proc getsfnq () {
+  getsnq()
+  if(fnq!=nil)nqsdel(fnq)
+  fnq=FreqNQS(snq,20,1,0)
+}
+//display & print average vals of snq,fnq
+proc dispfnq () { local ct
+  fnq.verbose=0
+  for ctt(&ct) {
+    fnq.select("Type",ct,"StartT","<=",tmax_INTF6)
+    printf("%s mean F = %g Hz\n",CTYP.o(ct).s,fnq.getcol("Freq").mean)
+    fnq.gr("Freq","EndT",0,clr,1)
+    clr+=1
+  }
+}
+
+//draw $2 cell type in $3 color from PActNQS $o1
+proc dispPActNQ () { local ct,color localobj anq,str  
+  anq=$o1 ct=$2 color=$3 str=new String() str.s="act"
+  if(numarg()>3)str.s=$s4
+  anq.select("ct",ct)
+  gvmarkflag=0
+  anq.gr(str.s,"ts",0,color,9)
+  gvmarkflag=1
+  anq.gr(str.s,"ts",0,color,10)
+  gvmarkflag=0
+}
+
+//* function calls
+//prl(1,1)
+prl(0,1) // disable printlist voltage recording for long runs to save RAM

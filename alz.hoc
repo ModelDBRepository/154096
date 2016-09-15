@@ -1,0 +1,1064 @@
+print "Loading alz.hoc..."
+// alz.hoc
+// Mark Rowan, School of Computer Science, University of Birmingham, UK
+// April 2012
+
+// Code to repeatedly delete neurons, allow synaptic compensation, and perform
+// repeat+unique trials for calculating Fourier information (Crumiller et al. 2011).
+//
+// TODO This is currently only set up for a single-column network. It might need some
+// basic extension (e.g. cycling through col[i].ce when setting values, rather than just
+// calling col.ce).
+
+// **********************************************************************
+// REQUIREMENTS:
+// Set buffertime (period between data writes) to an appropriate length of time (e.g. 800e3)
+// Set basetime (on which deletion duration, info trial length, baseline length) are based (e.g. 1600e3)
+// run.hoc: SPKSZ should be at least 20000e3 elements (assuming buffertime=800e3 and scale=1)
+// run.hoc: should have prl(0,1) as the last line in the file to turn off printlist recording
+// params.hoc: set PreDur, LearnDur and PostDur to appropriate values (see below under 'timing params')
+//
+// Typical timings:
+//             baseline (1 segment, BaselineDur)) to set scaling targets
+//             deletion (optionally with prosthesis) (100 segments, DeletionDur)
+//               => 101 saved spike segments of 1600s each = 161600s
+//               =~ 45 hours of data
+// **********************************************************************
+
+
+// **** USER-SETTABLE PARAMETERS ****
+
+
+// Timing params. Unit of time is ms (unlike in params.hoc, where it is seconds)
+//
+// *** Basic units ***
+declare("buffertime",800e3) // Time between spike-to-disk dumps (over-rides value in writedata.hoc)
+declare("basetime",1600e3) // Time on which various other events (GetInfoDur, BaselineDur, etc) are based
+// basetime sets the time between deletion batches (when dynamicdelete == 0) or the time
+// between external input scaleexternalwt checks (when dynamicdelete == 1)
+
+
+// *** Info trials ***
+declare("numpatterns",1) // Number of discrete patterns to be learned
+declare("numinfotrials",0) // Number of info trials to run
+declare("infotriallength",16e3) // Length of each signal / noise Fourier information trial
+// Only the second half of each trial is actually used by plot.py (this is to allow the
+// network to recover to baseline after each previous trial). So set infotriallength to
+// double the actual required length for each trial (e.g. for 8s trials, use 16s).
+
+
+// *** Main periods of simulation ***
+declare("GetInfoDur",numinfotrials*infotriallength*2) // Length of time to run information contribution trials. (numtrials * infotriallength * 2 trials (unique/repeat))
+declare("BaselineDur",basetime) // Length of baseline time to obtain scaling targets and learn patterns
+declare("DeletionDur",basetime*100) // Length of time to continue running for AD-based deletion
+
+
+// *** Alzheimer's event timings ***
+declare("scalingstart", GetInfoDur + BaselineDur) // Time after which to begin synaptic scaling
+// (needs to be long enough for the activity sensors to reach approximately the real average firing rate)
+declare("deletionstart", GetInfoDur + (10 * BaselineDur)) // How long before deletion starts?
+declare("prosthesisstart", GetInfoDur + (10 * BaselineDur)) // When should prosthesis be started?
+declare("prosthesisstop", GetInfoDur + BaselineDur + DeletionDur) // When should prosthesis be stopped?
+
+
+
+// Scaling params
+declare("scaling", 1) // Set to 1 to enable compensatory homeostatic synaptic scaling
+declare("growthfactorscaling", 1) // Set to 1 to enable additional global growth factor (BDNF/TNF-a) scaling
+declare("activitytau", 100e3) // Activity sensor time constant
+declare("activitybeta", 4.0e-8) // Scaling weight
+declare("activitygamma", 2.0e-10) // Scaling integral controller weight
+
+
+// External input and internal weight params
+declare("scaleexternal", 1) // Scale down the external inputs proportionally to the network deletion?
+declare("scaleexternalrate", 0.25) // Vary the external scaleexternalwt rate constant (if scaleexternal == 1)
+declare("externalwtgain", 1) // Starting gain for external inputs (multiple of initial weights)
+declare("internalwtgain", 1) // Gain multiplier for internal weights (i.e. to reduce before learning)
+declare("infotrialextwtgain", 0.6) // Reduce external inputs during info trials to prevent bursting
+
+
+// Deletion params
+declare("deleting", 1) // Set to 1 to enable deletion of cells
+declare("dynamicdelete", 1) // Set to 1 to enable dynamic deletion from within the cell, or 0 to revert to non-realistic fixed-size (deletionstep) batches of deletion
+
+// **** Fixed-size deletion step settings (dynamicdelete == 0)
+declare("randomdelete", 1) // If dynamicdelete == 0, set randomdelete to 1 for uniform random deletion, or 0 for scaling-proportional deletion
+declare("roulettewheelselection", 0) // If using randomdelete=0, this chooses whether cells chosen for scalefactor are picked using a roulette wheel, or if the max/min scaled cells are chosen by force
+declare("deletionstep", 3 * scale) // If dynamicdelete == 0, delete this many cells per batch
+
+// **** Dynamic deletion settings (dynamicdelete == 1)
+declare("delspeed", 0.0001) // For dynamic deletion only, set deletion rate constant
+declare("extinpdamage",0) // Damage network by reducing external inputs, or random cell deletion?
+if (extinpdamage) {
+  // Damage via reduction of external inputs (dynamicdelete == 1 && extinpdamage == 1)
+  declare("dynamicdelstep", 0.005) // Amount by which to reduce the external inputs
+} else {
+  // Damage via random deletion of cells (dynamicdelete == 1 && extinpdamage == 0)
+  declare("dynamicdelstep", 15) // Number of cells to delete
+}
+
+// Recording params
+numcells = col.ce.count() //470 * scale // Number of cells in the network (set in network.hoc:77 and :124) -- for reading oly
+declare("recording_interval", 100e3) // How many ms between scalefactor/activity/etc recordings. Smaller intervals give better graph resolution, but may result in graphs with very large filesize
+declare("recording_start", 0) // Start recording data after this time
+
+
+// Stimulus params for learning and retrieval
+declare("stimseed",1) // Default seed for Poisson stims (prosthesis, signal, noise) and cell deletion
+declare("stimpercent",15) // Percentage of population (default=E4) to stimulate as part of a 'pattern'
+declare("stimsy",AM2) // Which synapses to stimulate
+declare("stimfreq",4) // Frequency (Hz) of information trials signal
+declare("infostimwt",18) // Weight of stimulus during info trials
+declare("stimwt",0.0001) // Weight of pattern retrieval stimulus signal when not doing trials
+declare("useACh",0) // Whether to use simulated acetylcholine to 'clamp' cells not part of a pattern
+declare("inhibsy",GA) // Which synapses to use for cholinergic suppression of cells
+declare("inhibwt", 0.1) // Weight of inhibition during cholinergic suppression
+declare("nsigcellpops",5) // Number of populations from the list to recieve input (default=all E, must be >= nproscellpops)
+
+
+// Params for treatment stimulation ('prosthesis')
+declare("prosfreq", 3) // Prosthesis frequency (Hz) 
+declare("proswt",2) // Prosthesis weight
+declare("useprosthesis",1) // '1' to use prosthesis, '0' to disable
+declare("nproscellpops",5) // Number of populations from the list to receive prosthesis (default=all E, must be <= nsigcellpops)
+declare("useinfosignal",0) // Whether to use an additional signal (e.g. rat LFP) in E4 to probe information transfer values during stimulation
+declare("infosignalstart", 0) // Start information-carrying signal immediately
+declare("infosignalfreq",20) // Information signal frequency -- from Cliff's electrostimulation code
+
+// **** END USER-SETTABLE PARAMETERS ****
+
+
+// Check that timings match the sim length set in params.hoc
+if (PreDur + ZipDur + LearnDur + PostDur != (GetInfoDur + BaselineDur + DeletionDur)/1e3) {
+  printf("ERROR: PreDur in params.hoc must be set to %d (or distributed across LearnDur, PostDur, etc. as required).", (GetInfoDur + BaselineDur + DeletionDur)/1e3)
+  quit() // Kill the sim
+}
+
+// Load helper functions
+load_file("writedata.hoc") // Allow periodic saving of data to disk
+load_file("flexinput.hoc") // Provides poisadd
+
+// Define objects
+objref remainingcellIDs, randgen, deletionList, auxFile, varsFile, popsig, popprosth, popdamage, sig1, sig2, signal, noisesig, cellpop, proscellpop, prosspks, stimwtvec, proswtvec, p, patterndata, patternpointers, pickpattern, infosignal
+strdef auxFileName
+strdef varsFileName
+
+
+proc setup() {
+  // Set up list of remaining undeleted cells
+  remainingcellIDs = new Vector(numcells)
+  remainingcellIDs.indgen(1) // Generate elements from 0 to numcells-1
+
+  // Initialise RNG
+  randgen = new Random(stimseed)
+
+  // Set scaling parameters in INTF6
+  col.ce.o(0).setactivitytau(activitytau)
+  col.ce.o(0).setactivitygamma(activitygamma)
+  col.ce.o(0).setactivitybeta(activitybeta)
+
+  // Create data file
+  // filepath should already have been allocated in writedata.hoc
+  sprint(auxFileName, "%s/%s", filepath, "aux")
+  sprint(varsFileName, "%s/%s", filepath, "vars")
+  auxFile = new File(auxFileName)
+  varsFile = new File(varsFileName)
+  header_written = 0 // Instruct write_scaling_data() to write vars file header
+
+  // Set up external rat LFP stimulus and artificial prosthesis stimulus
+  setupstims()
+
+  // Generate set of patterns to be learned
+  if (GetInfoDur > 0) {
+    createpatterns()
+  }
+
+  if (internalwtgain != 1) {
+    scaleinitialweights()
+  }
+}
+
+
+proc scaleinitialweights() { localobj syw1,syw2,cel
+  // Scale down initial synaptic weights
+  // Start by initialising empty vectors, into which getsywv() will copy the weights
+  for y=0,col.ce.count-1 {
+    cel=col.ce.o(y)
+
+    syw1 = new Vector() // Pre-allocate Vectors
+    syw2 = new Vector()
+    vrsz(cel.getdvi,syw1,syw2) // Resize the Vectors to match the ip->dvt within the cell
+    syw1.fill(0)
+    syw2.fill(0)
+
+    cel.getsywv(syw1,syw2)
+    syw1.mul(internalwtgain) // Scale the weights
+    syw2.mul(internalwtgain)
+    cel.setsywv(syw1,syw2) // Set new weights
+  }
+}
+
+
+proc createpatterns() { localobj pattern, pickcell
+  patterndata = new Vector() // This Vector will store all the individual pattern Vectors
+  patternpointers = new Vector() // This Vector stores the pointers to separate the patterns
+  pickcell=new Random(fixedseed) // Random number generator
+  pickcell.uniform(0,1) // Require uniform-distributed random numbers from 0->1
+  npops=cellpop.size() // Number of cell populations
+
+  // For each pattern we need to create...
+  // (Deliberately running from 0,numpatterns (== numpatterns+1)
+  // as the first pattern will be used as the 'repeat' stimulus during info trials)
+  // we create numpatternn+1 Vectors and store them in 'pattterndata', with pointers
+  // in 'patternpointers'.
+  //
+  // Hoc does not let you have a Vector of Vectors (that would just be too useful) or even
+  // a 2-D array, so we must do some hackery.
+  //
+  // The patterndata Vector contains a list of all the cell IDs for each pattern, but
+  // as it's a linear array, we need a second Vector 'patternpointers' which denotes
+  // the start index of each pattern in patterndata. This allows arbitrary-length (but
+  // non-resizable) arrays of cell IDs to be accessed.
+
+  for x=0,numpatterns {
+    pattern = new Vector() // Temporary vector for each pattern
+
+    for h=0,numcols-1 { // Loop over columns
+      for i=0,npops-1 { // Loop over each cell population
+        cellstart=col[h].ix[cellpop.x[i]] // Starting cell index
+        cellfinish=col[h].ixe[cellpop.x[i]] // Finishing cell index
+        for cellid=cellstart,cellfinish { // Loop over each cell in the population
+          pickthiscell=100*pickcell.repick() // Whether or not to pick this cell
+          if(stimpercent>pickthiscell) { // Pick out cellprct percent of cells
+            pattern.append(cellid) // Add this cell ID to the Vector
+            //printf("adding %d\n", cellid)
+          }
+        }
+      }
+    }
+    //printf("Pattern: ")
+    //pattern.printf()
+    patterndata.append(pattern) // Add to the end of the current patterns
+    patternpointers.append(pattern.size()) // Add pointer to end of the pattern
+
+    pickpattern=new Random(fixedseed) // Random number generator for choosing patterns
+    // Pattern 0 is reserved for the 'repeats' stimulus
+    pickpattern.uniform(1,numpatterns) // Require uniform-distributed random numbers from 1->numpatterns
+
+    //printf("\nVector: ")
+    //patterndata.printf()
+    //printf("\nPointers: ")
+    //patternpointers.printf()
+
+    //printf("\nRetrieval of pattern %d: ", x)
+    //patterntest=getpattern(x)
+    //patterntest.printf()
+    //printf("\n\n")
+
+  }
+  printf("Created %d unique patterns totalling %d cells\n", numpatterns, patterndata.size())
+}
+
+
+obfunc getpattern() { local patternnum localobj data, pointers, output
+  // Requires:
+  //  data: Vector of 'patterns' containing cell IDs (global)
+  //  pointers: Vector of pointers to each pattern in patterndata (global)
+  //  patternnum: index of the pattern we want to retrive
+  // Returns:
+  //  Vector containing the elements of patterndata defined by the pointers
+  //  in patternpointers
+  //
+  // Confusing? That's hoc's lack of object encapsulation for you...
+  
+  //data = $o1
+  //pointers = $o2
+  patternnum = $1
+  patternlength = patternpointers.x[patternnum] // Obtain length of the desired pattern
+  patternstart = 0
+  for i=0,patternnum-1 {
+    // Obtain the length of each prior pattern
+    patternstart = patternstart + patternpointers.x[i]
+  }
+  patternend = patternstart + patternpointers.x[patternnum] -1 // Find end index
+
+  //printf("\nStart: %d, end: %d\n", patternstart, patternend)
+
+  output = new Vector()
+  for i=patternstart,patternend {
+    output.append(patterndata.x[i]) // Copy data from the pattern vector
+  }
+
+  return output
+
+  // Testing:
+  // Six patterns in 'data', conveniently (in this case) consisting entirely
+  // of arbitrary number of values, which are equal to the pattern's index
+  // data = [0 0 0 0 1 1 1 2 2 2 2 3 3 4 4 4 4 4 5]
+  //
+  // pointers = [4 3 4 2 5 1]  // These pointers are the LENGTHS of the patterns
+  //
+  // patternnum = 0
+  //   patternstart = 0
+  //   for i = 0,0 {}
+  //   patternend=patternstart + 4 - 1 = 3
+  //   output = data[0,3] = [0 0 0 0]
+  //
+  // patternnum = 1
+  //   patternstart = 0
+  //   for i = 0,1
+  //     patternstart += pointers[0] = 4
+  //   patternend = 4 + pointers[1] = 4+3 -1 = 6
+  //   output = data[4,6] = [1 1 1]
+}
+
+
+proc setupstims() { local i
+   // Define populations
+  popsig=new Vector(5)
+  // Pop to be stimulated by input sensory signal for information trials
+  popsig.x[0]=E4
+  popsig.x[1]=E2
+  popsig.x[2]=E6
+  popsig.x[3]=E5R
+  popsig.x[4]=E5B
+
+  popprosth=new Vector(5)
+  // Pop to be stimulated by prosthesis, when activated
+  popprosth.x[0]=E2
+  popprosth.x[1]=E4
+  popprosth.x[2]=E6
+  popprosth.x[3]=E5R
+  popprosth.x[4]=E5B
+  
+  // Create a regular stimulation signal at stimfreq Hz for information trials
+  signal=new Vector(infotriallength * stimfreq + 1) // Must be >= num spikes
+  signal.fill(1) // Every element gives an equal probability of a spike
+  
+  // Add the populations to be stimulated to cellpop, from the lists of possible populations
+  //nsigcellpops=5 // Number of populations from the list to recieve input (now set at start)
+  cellpop=new Vector()
+  for i=0,nsigcellpops-1 cellpop.append(popsig.x[i]) 
+  //nproscellpops=5 // Number of populations from the list to receive prosthesis (now set at start)
+  proscellpop=new Vector()
+  for i=0,nproscellpops-1 proscellpop.append(popprosth.x[i])
+
+  // For each population in popsig (up to nsigcellpops),
+  // assign the stimulation weight = stimwt
+  // This will then get passed into poisadd() as the 'signal/noise' stim weight
+  stimwtvec=new Vector()
+  for i=0,nsigcellpops-1 stimwtvec.append(stimwt)
+
+  // For each population in proscellpop (up to nproscellpops),
+  // assign the proswt correctly. For all other cell populations mentioned
+  // in popsig, set the proswt to 0.001 (This is necessary to avoid INTF6 crashes;
+  // see setprosthesis() for explanation).
+  // Also, the list of populations to be stimulated by prosthesis must be a subset of
+  // cellpop. If nsigcellpops < nproscellpops, this will not work.
+  proswtvec=new Vector(nsigcellpops) // Create vector at same length as cellpop
+  proswtvec.fill(0.001) // Fill with low-weights by default
+  for i=0,nsigcellpops-1 {
+    if (proscellpop.contains(cellpop.x[i])) {
+      proswtvec.x[i] = proswt // Set this particular population's weight to correct value
+    }
+  }
+
+  // Add a fake stimulus -- without it, upon initialisation the INTF6 will think there are no spikes
+  // to be presented to the network, and will stop listening to any future spikes (including those
+  // which we'd like to push with pushspks() at a later time). This is because,
+  // in INTF6, once the vector pointer reaches the end, it sets nxt=-1 and this kills the
+  // 'net_send'/'NET_RECEIVE' loop (search for 'if (nxt>0)' in intf6.mod).
+
+  if (useinfosignal) {
+    // If we are sending two signals concurrently (info signal and prosthesis), make sure the
+    // earlier of the two is used as the timing point for the kick-off 'firstshocktime'
+    if (prosthesisstart < infosignalstart) {
+      firstshocktime = prosthesisstart + 1
+    } else {
+      firstshocktime = infosignalstart + 1
+    }
+  } else {
+    // Otherwise, in the absence of info signal, just use prosthesisstart time
+    firstshocktime = prosthesisstart + 1
+  }
+  for i=0,numcols-1 for j=0,nsigcellpops-1 for case(&x,popsig.x[j]) for case(&y,stimsy) for ns=0,1 {
+    wshock[i][x][y][ns] = 0.001 // Something very small
+    durshock[i][x][y][ns] = 1
+    prctshock[i][x][y][ns] = 100 // Shock everything, but weights are so low it doesn't matter
+    nshock[i][x][y][ns] = 1 // Only one shock
+    isishock[i][x][y][ns] = 100
+    startshock[i][x][y][ns] = firstshocktime
+  }
+  setshock(1) // Set fake spike, and clear any existing spikes
+}
+
+
+proc setsignalwt() {
+  stimwt = $1
+  printf("Setting signal weight to %f\n", stimwt)
+  for i=0,nsigcellpops-1 stimwtvec.x[i] = stimwt
+}
+
+
+func getgain() { local startgain, remain
+  // Returns gain multiplier for the external inputs, given the starting gain and the
+  // number of remaining cells, as well as the scaleexternalrate
+ 
+  //gain = 1 - ((1 - (remainingcellIDs.size() / numcells)) * scaleexternalrate) // Assumes startgain = 1
+  
+  startgain = externalwtgain
+  remain = remainingcellIDs.size()
+  // Give smooth decrease from startgain, at rate scaleexternalrate, based on num remaining cells
+  return startgain - (( ((numcells-remain) / numcells) * startgain) * scaleexternalrate)
+}
+
+
+
+proc turn_on_scaling() {
+  // Turn on E-cell compensatory synaptic scaling
+  printf("Turning on synaptic scaling\n")
+  col.ce.o(0).setscaling(1) // 1 for scaling on, 0 for scaling off
+
+  if (growthfactorscaling) {
+    printf("Turning on additional BDNF/TNF-a growth factor scaling\n")
+    col.ce.o(0).setgrowthfactorscaling(1)
+    update_growth_factor_scaling() // Force network to update its growth factor-based scaling targets
+  }
+
+  // NOTE:
+  // Can also use setIscaling(1) to include I-cells, but this seriously
+  // unbalances the network dynamics (and I-cell scaling may be biologically
+  // implausible anyway -- see Turrigiano (2011) "Too many cooks" paper)
+}
+
+
+proc turn_on_dynamic_deletion() {
+  // Enable dynamic deletion, whereby each cell can independently die with probability as
+  // a function of its scaling factor, at any given moment in time (rather than deleting
+  // in batches) -- this should allow a varying cell deletion rate as network damage
+  // progresses and cascades.
+
+  printf("Turning on dynamic deletion with speed = %f\n", delspeed)
+  // Delspeed controls the rate constant for deletion
+  // (set to -1 to turn off dynamic deletion)
+  col.ce.o(0).setdeletion(delspeed)
+
+  if (extinpdamage) {
+    externalwtgain = externalwtgain - dynamicdelstep // Reduce external inputs by dynamicdelstep
+    scaleexternalwt(getgain()) // Scale down external inputs
+  } else {
+    // Delete highest-scaling 'dynamicdelstep' cells to kick-start Alzheimer's damage
+    printf("Killing off %d cells to kick-start damage\n", dynamicdelstep)
+
+    // Most efficient for large deletion step would be to sort on scaling value,
+    // then delete the top n cells from the list.
+    // But we don't need to sort the rest of the cells after the top n,
+    // so I will be lazy (as this is only executed once) and simply loop
+    // n times over the remainingcellIDs, deleting the top scaling factor
+    // cell each time.
+    for n=0,dynamicdelstep {
+      biggestscalefac = 1 // Biggest scaling factor seen so far
+      id = remainingcellIDs.x[int(randgen.repick())] // Get random cell index from remainingcellIDs
+      for i=0,remainingcellIDs.size()-1 {
+        // Loop over all remaining cells and get their scale factors
+        scalefac = col.ce.o(remainingcellIDs.x[i]).get_scale_factor()
+        if (scalefac > biggestscalefac) {
+          biggestscalefac = scalefac
+          id = remainingcellIDs.x[i]
+        }
+      }
+      printf("Deleted %d, scalefactor = %f\n",id,biggestscalefac)
+      col.ce.o(id).flag("dead",1) // Kill cell
+      remainingcellIDs.remove(remainingcellIDs.indwhere("==", id)) // Remove from list of remaining cells
+    }
+  }
+
+  if (scaleexternal) {
+    cvode.event(t + basetime/100, "dynamicscaleexternalwt()") // Begin continuous external input downscaling
+  }
+}
+
+
+proc update_growth_factor_scaling() {
+  cvode.event(t + 10e3, "update_growth_factor_scaling()") // Queue next event
+  global_scale_factor = col.ce.o(0).update_global_scale_factor()
+  printf("Global growth factor scaling = %f\n", global_scale_factor)
+}
+
+
+proc dynamicscaleexternalwt() { local i
+  // Enable external inputs to scale down pseudo-continuously by checking repeatedly the proportion of
+  // remaining cells, removing them from remainingcellIDs, and scaling external inputs down by this amount
+  cvode.event(t + 10e3, "dynamicscaleexternalwt()") // Queue next downscaling event
+  
+  // Find out if any other cells have been deleted since the last call
+  // Loop through all cells
+  for i=0,numcells-1 {
+    // If cell is dead but is still in remainingcellIDs, then remove it
+    if (col.ce.o(i).get_dead() && remainingcellIDs.contains(i)) {
+      printf("Cell %d detected as dead, removing from remaining list\n", i)
+      remainingcellIDs.remove(remainingcellIDs.indwhere("==", i)) // Remove from list of remaining cells
+    }
+  }
+  
+  scaleexternalwt(getgain())
+}
+
+
+
+proc deletionround() { local i, deleted, temp, total, randpointer localobj cumsum
+  // Delete a number of cells (deletionstep) in one batch, either at flat-random,
+  // or in proportion to scaling factors to simulate Small (2008)'s hypothesis of
+  // progression of Alzheimer's disease via synaptic scaling.
+  printf("*** %d cells remaining, deleting %d\n", remainingcellIDs.size(), deletionstep)
+  deletionList = new Vector() // Reset deletionList
+
+  // Obtain list of cells to be deleted (either at uniform random, or proportional to compensation)
+  temp = 0
+  deleted = 0
+  while (deleted < deletionstep) {
+  
+    if (randomdelete) {
+      // Delete at uniform random
+      randgen.uniform(0, remainingcellIDs.size()) // Uniform-random over 0 to number of remaining cells
+      temp = remainingcellIDs.x[int(randgen.repick())] // Get random cell index from remainingcellIDs
+    } else {
+      if (roulettewheelselection) {
+        // Delete randomly in proportion to compensation rates
+      
+        // Fill Vector with cumulative sum total of scalefactors
+        cumsum = new Vector(remainingcellIDs.size())
+        total = 0
+        temp = 0
+        for i=0,remainingcellIDs.size()-1 {
+          scalefac = col.ce.o(remainingcellIDs.x[i]).get_scale_factor() ^2
+          // squaring scalefactors increases distinction early in the deletion process
+          //
+          // Ideally I could also subtract 1 from this to show that scaling DOWN is also bad
+          // for the neuron (as it's being driven to over-activity, and is constantly trying to
+          // scale down) -- but that means the initial cumsum total will be 0 as all the scalefac
+          // values will be (1 - 1)^2 = 0, which will cause problems.
+          //   e.g. for scalefac = 0.5, (0.5 - 1)^2 = -0.5^2 = 0.25  (forced to scale down)
+          //   but for scalefac = 1, (1 - 1)^2 = 0  (no scaling, therefore stable neuron)
+          //   and for scalefac = 2, (2 - 1)^2 = 1  (scaling up)
+          cumsum.x[i] = scalefac + total
+          total = total + scalefac
+        }
+      
+        // Pick a random value from 0 -> cumsum
+        randgen.uniform(0, total) // Re-distribute random numbers from 0->cumsum total
+        randompointer = randgen.repick()
+        //printf("random pointer %f\n", randompointer)
+        //printf("temp: %d, cumsum.x[temp]: %f\n", temp, cumsum.x[temp])
+
+        // Loop through cumsum until cumsum is greater than randpointer
+        while (randompointer >= cumsum.x[temp]) {
+          //printf("checking cell %f, cumsum %f\n", temp, cumsum.x[temp])
+          temp = temp + 1
+          if (temp >= remainingcellIDs.size()) {
+            printf("ERROR: cum sum of scale factors incorrectly calculated (randpointer too large)")
+            temp = remainingcellIDs.size() // Default to first index of remainingcellIDs
+          }
+        }
+        temp = remainingcellIDs.x[temp] // Get the actual cell ID for this location
+
+      } else {
+        // Not using roulette-wheel selection, i.e. directly deleting the max/min scaled cells
+      
+        // Find the cell with the largest scalefactor distance from 1
+        // (so 0.5 should be weighted as strongly as 2, and 0.1 weighted as strongly as 10)
+        biggestscaledelta = 1 // Scale factors are centred around 1
+        randgen.uniform(0, remainingcellIDs.size()) 
+        temp = remainingcellIDs.x[int(randgen.repick())] // Start with random cell so we don't always delete the first cell in the list 
+
+        for i=0,remainingcellIDs.size()-1 {
+          // Loop over all remaining cells and get their scale factors
+          scalefac = col.ce.o(remainingcellIDs.x[i]).get_scale_factor()
+
+          // If scalefactor < 1, check if (1 / scalefactor) > biggestscaledelta
+          if (scalefac > biggestscaledelta) {
+            // e.g. scalfac = 2, biggestscaledelta = 2
+            biggestscaledelta = scalefac
+            temp = remainingcellIDs.x[i]
+          }
+          if (scalefac < 1 && 1/scalefac > biggestscaledelta) {
+            // e.g. scalefac = 0.5, biggestscaledelta = 2
+            biggestscaledelta = 1/scalefac
+            temp = remainingcellIDs.x[i]
+          }
+        }
+      }
+    }
+
+    // Now we have a cell-to-be-deleted (named 'temp'), so add it to the deletion list
+    if (!deletionList.contains(temp)) {
+      deleted = deleted + 1
+      //printf("Deleting cell %d, scalefactor = %f\n", temp, col.ce.o(temp).get_scale_factor())
+      deletionList.append(temp) // Only append index if it's unique
+      remainingcellIDs.remove(remainingcellIDs.indwhere("==", temp)) // Remove from list of remaining cells
+    } else {
+      printf("ERROR: Tried to delete cell %d twice\n", temp)
+    }
+  }
+  
+  for vtr(&id,deletionList) {
+    // Delete cells in deletionList
+    printf("Deleting cell %d, scalefactor = %f\n", id, col.ce.o(id).get_scale_factor())
+    // Write deletionlist and compensation rates of deleted cells to file
+    col.ce.o(id).flag("dead",1) // Borrowed from network.hoc:dokill()
+    //printf("%d\n", col.ce.o(id).get_id())
+  }
+
+  if (scaleexternal) {
+    scaleexternalwt(getgain()) // Scale external input weights down as the network is deleted
+  }
+
+  // While there are still cells to delete, queue another round of deletion
+  if (remainingcellIDs.size() > deletionstep) {
+    cvode.event(t + basetime, "deletionround()") 
+  }
+}
+
+
+proc scaleexternalwt() { local c,i,vhz,a,sy,ct,idx,sdx localobj vsy,nc
+  // scaleexternalwt(gain)
+  // Reduce strength of external inputs linearly as deletion progresses.
+  // Should be reasonable, as if other columns (represented by external inputs) are also
+  // suffering atrophy, their output strengths (to this model's column) will be reduced too.
+  a=allocvecs(vsy)
+  vsy.append(GA) vsy.append(GA2) vsy.append(AM2) vsy.append(NM2) vsy.append(AM) vsy.append(NM)
+  //setwmatex() // Reinitialise weights matrix
+  gain = $1
+  printf("External input gain: %f\n", gain)
+
+  // For each CSTIM in lcstim
+  for c = 0, lcstim.count-1 {
+    i = 0 // Increment through the NetCon objects within this CSTIM
+    // For each NetCon in ncl (based on col.hoc proc nsstim) -- based on col.hoc proc nsstim()
+    for sdx=0,vsy.size-1 {
+      sy=vsy.x(sdx) // go through synapse types
+      for ct=0,CTYPi-1 if(col.numc[ct] && wmatex[ct][sy] && ratex[ct][sy]) {//go through cell types, check weights,rates of inputs 
+        for idx = col.ix[ct], col.ixe[ct] {
+          //printf("idx %d\n", idx)
+          // For each cell of type ct (idx is id of the cell)
+          // change the weights according to the new values in wmatex, scaled down by gain
+          lcstim.o(c).ncl.o(i).weight(sy) = lcstim.o(c).wmatex[ct][sy] * gain
+          //printf("c %d, i %d, weight %f\n", c, i, lcstim.o(c).ncl.o(i).weight(sy))
+          i = i + 1 // Increment to next NetCon in the list
+        }
+      }
+    }
+  }
+  dealloc(a)
+}
+
+
+proc setEexternalinputweights() { local c,i,vhz,a,sy,ct,idx,sdx localobj vsy,nc
+  // setexternalinputweights(gain)
+  // Where 'gain' is a multiplier for the original weight matrix values
+  // (hence different to proc scaleexternalwt() )
+  // e.g. 1.0 (to restore original values), 0.5 (to damage population),
+  // or 0.01 (to turn off external inputs -- do not use 0 as this kills INTF6)
+  //
+  // Changes strength of all external inputs (can be used with prosthesis
+  // to show restoration of firing activity when external inputs are reduced)
+  //
+  // Differs to proc scaleexternalwt() as this also takes note of popsig, and ONLY
+  // scales the external inputs to cells within that population of cells.
+  
+  a=allocvecs(vsy)
+  vsy.append(GA) vsy.append(GA2) vsy.append(AM2) vsy.append(NM2) vsy.append(AM) vsy.append(NM)
+  //setwmatex() // Reinitialise weights matrix
+  gain = $1
+  printf("Set external inputs to selected cell populations = %f\n", gain)
+
+  // For each CSTIM in lcstim
+  for c = 0, lcstim.count-1 {
+    i = 0 // Increment through the NetCon objects within this CSTIM
+    // For each NetCon in ncl (based on col.hoc proc nsstim) -- based on col.hoc proc nsstim()
+    for sdx=0,vsy.size-1 {
+      // For each synapse type
+      sy=vsy.x(sdx)
+      for j=0,nsigcellpops-1 {
+        ct=popsig.x[j] // Pick cell population to damage (will only go up to nsigcellpops)
+      //for ct=0,CTYPi-1 {
+        // For each cell type
+        if(col.numc[ct] && wmatex[ct][sy] && ratex[ct][sy]) {
+          for idx = col.ix[ct], col.ixe[ct] {
+            //printf("idx %d\n", idx)
+            // For each cell of type ct (idx is id of the cell)
+            // change the weights according to the new values in wmatex, scaled down by gain
+            lcstim.o(c).ncl.o(i).weight(sy) = lcstim.o(c).wmatex[ct][sy] * gain
+            //printf("c %d, i %d, weight %f\n", c, i, lcstim.o(c).ncl.o(i).weight(sy))
+            i = i + 1 // Increment to next NetCon in the list
+          }
+        }
+      }
+    }
+  }
+  dealloc(a)
+}
+
+
+proc restoreexternalwt() {
+  // Slowly increase external input weights for E cells from 'gain' back to starting value
+  // (Simply setting them instantly to 1 sends the network to hyperactivity)
+  gain = $1
+  if (gain < externalwtgain) {
+    gain = gain + (externalwtgain / 10)
+    cvode.event(t + 5e3, "restoreexternalwt(gain)")
+    scaleexternalwt(gain)
+  }
+}
+
+
+proc repeatinfotrial() { local sigwt localobj pattern, spkoutput
+  // Queue next unique trial
+  printf("Recall repeat (noise) pattern for %d ms\n", infotriallength)
+  cvode.event(t + infotriallength, "uniqueinfotrial()")
+
+  // Clear previous spike train data structures to release memory
+  for i=0,numcols-1 {
+    nqsdel(col[i].cstim.vq) // Delete existing NQS
+    col[i].cstim.vq = new NQS("ind","time","wt","sy") // Create new NQS
+  }
+
+  // Assuming infotriallength=16e3, leave 8s of quiescence, then start stim for 8s
+  time_1 = t + (infotriallength/2) // Time at which to start the signal stimulus
+  time_2 = t + infotriallength // Time at which to stop the signal stimulus
+
+  pattern = getpattern(0) // Use first pattern as the 'repeats' stimulus
+
+  if (time_2 < GetInfoDur) {
+    sigwt = infostimwt // Use high-power stim during info trials
+  } else {
+    sigwt = stimwt // Use low-power stim
+  }
+
+  // Add Poisson stimulus for each cell in the pattern
+  for x=0,pattern.size()-1 { // Loop over each cell in the input list
+    cellid=pattern.x[x]
+    spkoutput=poistim(signal,time_1,time_2,stimfreq,stimseed+t) // Calculate Poisson train
+    stimadd(spkoutput,cellid,sigwt,stimsy)
+  }
+
+  if (useACh) {
+    // Apply cholinergic suppression to cells not part of the pattern,
+    // to prevent spontaneous retrieval of previously-stored patterns during learning
+    for x=0,numcells-1 {
+      // Find all E cells not in the pattern, and apply GABA stimulation
+      //printf("Cell %d, ice %d, inpattern %d\n", x, ice(col.ce.o[x]), pattern.contains(x))
+      if (!ice(col.ce.o[x]) && !pattern.contains(x)) {
+        // If not an I cell (i.e. we only want to suppress E cells), and not in pattern
+        //printf("inhibiting cell %d \n", x)
+        spkoutput=poistim(signal,time_1,time_2,stimfreq,stimseed+t) // Calculate Poisson train
+        stimadd(spkoutput,x,inhibwt,inhibsy)
+      }
+    }
+  }
+
+
+  // Rather than calling setshock(0), just call the actual pushspks code directly:
+  for i=0,numcols-1 {
+    col[i].cstim.pushspks()
+  }
+}
+
+
+proc uniqueinfotrial() { local sigwt localobj pattern, spkoutput
+  // Queue next unique trial
+
+  cvode.event(t + infotriallength, "repeatinfotrial()")
+  printf("Recall unique (signal) pattern for %d ms\n", infotriallength)
+
+  // Clear previous spike train data structures to release memory
+  for i=0,numcols-1 {
+    nqsdel(col[i].cstim.vq) // Delete existing NQS
+    col[i].cstim.vq = new NQS("ind","time","wt","sy") // Create new NQS
+  }
+
+  // Assuming infotriallength=16e3, leave 8s of quiescence, then start stim for 8s
+  time_1 = t + (infotriallength/2) // Time at which to start the signal stimulus
+  time_2 = t + infotriallength // Time at which to stop the signal stimulus
+
+  // Pick a random pattern
+  randompattern = int(pickpattern.repick()) // Pick one pattern at random
+  pattern = getpattern(randompattern)
+  printf("Retrieving pattern %d\n", randompattern)
+  
+  if (time_2 < GetInfoDur) {
+    sigwt = infostimwt // Use high-power stim during info trials
+  } else {
+    sigwt = stimwt // Use low-power stim
+  }
+
+  // Add Poisson stimulus for each cell in the pattern
+  for x=0,pattern.size()-1 { // Loop over each cell in the input list
+    cellid=pattern.x[x]
+    spkoutput=poistim(signal,time_1,time_2,stimfreq,stimseed+t) // Calculate Poisson train
+    stimadd(spkoutput,cellid,sigwt,stimsy)
+  }
+
+  if (useACh) {
+    // During learning, apply cholinergic suppression to cells not part of the pattern,
+    // to prevent spontaneous retrieval of previously-stored patterns
+    for x=0,numcells-1 {
+      // Find all E cells not in the pattern, and apply GABA stimulation
+      //printf("Cell %d, ice %d, inpattern %d\n", x, ice(col.ce.o[x]), pattern.contains(x))
+      if (!ice(col.ce.o[x]) && !pattern.contains(x)) {
+        // If not an I cell (i.e. we only want to suppress E cells), and not in pattern
+        //printf("inhibiting cell %d \n", x)
+        spkoutput=poistim(signal,time_1,time_2,stimfreq,stimseed+t) // Calculate Poisson train
+        stimadd(spkoutput,x,inhibwt,inhibsy)
+      }
+    }
+  }
+
+  // Rather than calling setshock(0), just call the actual pushspks code directly:
+  for i=0,numcols-1 {
+    col[i].cstim.pushspks()
+  }
+
+  //col.cstim.vq.pr(col.cstim.vq.size(-1)-1) // View individual spike times
+}
+
+
+proc setprosthesis() { local i,j,inputseed
+  cvode.event(t + infotriallength, "setprosthesis()") // Queue next prosthesis segment
+  printf("Set up prosthesis for next %d ms\n", infotriallength)
+  
+  // Clear previous spike train data structures to release memory
+  for i=0,numcols-1 {
+    nqsdel(col[i].cstim.vq) // Delete existing NQS
+    col[i].cstim.vq = new NQS("ind","time","wt","sy") // Create new NQS
+  }
+
+  time_1 = t
+  time_2 = t + infotriallength*2
+  printf("Generating prosthesis spikes\n")
+  prosspks = new Vector(infotriallength * prosfreq + 1) // Create Vector with one element per spike
+  prosspks.fill(1) // Fill with 1s so every timestep, there is an equal chance of causing a spike
+  membranestim = 1 // Direct current injection into the cell
+
+  // If we are doing Fourier info trials for a period of time, but then turning them off and doing
+  // neurostimulation on only a subset of populations, the INTF6 will crash if we don't continue
+  // to stim ALL the cells (i.e. == cellpop, not proscellpop) which are used in the information contribution trials.
+  // So atlhough we only want to stim the proscellpop populations with the prosthesis, we should
+  // also set a low-weight 'keep-alive' stim for all the other cells.
+  // This is achieved by setting the proswtvec to low values for the populations in cellpop which
+  // are not to be stimmed, and setting to proswt for the populations which will be stimmed.
+  poisadd(prosspks,time_1,time_2,prosfreq,cellpop,100,proswtvec,stimsy,stimseed+t,membranestim) // Vary the random seed, and cause poisadd to remove effects of scaling when modelling the prosthesis weight (so the prosthesis can directly stimulate the 'cell membrane')
+  for i=0,numcols-1 {
+    col[i].cstim.pushspks()
+  }
+}
+
+
+proc setupinfosignal() { localobj sig1, sig2, cellpop
+  // Read rat LFP data file and process signal
+  // From Cliff's batch.hoc procedures
+  print "Creating information signal"
+  infosiglength = infotriallength*2 + 1 // With +1, we can ensure the vector is always longer than the presentation time, so acting as a keep-alive for the stimulation
+
+  // Read in stimulus from file
+  ropen("ratlfp.dat") // Open file for reading
+  veclen=infosiglength/1000*infosignalfreq // Number of elements required
+  filesize=363818 // Number of lines in the file. Stupid? Yes.
+  sig1 = new Vector(filesize) // Create new signal. Sigh. Stupidly there's no way to automatically load an entire text file.
+  for i=0,filesize-1 sig1.x[i] = fscan() // Get one number from the file
+  ropen() // Close the input file
+
+  // Downsample
+  objref p
+  p = new PythonObject()
+  nrnpython("import pyhoc")
+  origrate=4000 // 4 kHz
+  npts=origrate*infosiglength/1000 // Number of elements of the original to use
+  sig2=new Vector(npts) // Initialize semifinal signal
+  for i=0,npts-1 sig2.x[i]=sig1.x[i] // Copy vector
+  infosignal=p.pyhoc.downsample(sig2,origrate,infosignalfreq) // Finally, compute final vector
+  infosignal.add(-signal.min()) // Make minimum zero
+  infosignal.div(signal.max()*1.1) // Make maximum 90%
+  infosignal.add(0.05) // Add 5% to make bounds [5%,95%]
+  print "Done"
+}
+
+
+proc startinfosignalandprosthesis() { local infosiglength, time_1, time_2 localobj infosignalwtvec, infosignalpopvec
+  // NOTE: This is a different information signal to the one used in the "info trials" (i.e. infotriallength, etc)
+  // The info trials are a series of short high-intensity stimulations designed for use with the Crumiller et al.
+  // Fourier information method.
+  // This information signal, on the other hand, is an ongoing permanent input to E4 only which is used with the
+  // neuroprosthetic stimulation to determine whether the prosthesis affects information flow in the network.
+  infosiglength = infotriallength*2
+  cvode.event(t + infosiglength, "startinfosignalandprosthesis()") // Queue next information signal segment
+  printf("Set up information signal for next %d ms\n", infosiglength)
+  
+  // Clear previous spike train data structures to release memory
+  for i=0,numcols-1 {
+    nqsdel(col[i].cstim.vq) // Delete existing NQS
+    col[i].cstim.vq = new NQS("ind","time","wt","sy") // Create new NQS
+  }
+
+  time_1 = t
+  time_2 = t + infosiglength + 1
+
+  stimwtvec.x[0] = infostimwt // Set E4 population to high-weight stim
+  poisadd(infosignal,time_1,time_2,infosignalfreq,cellpop,100,stimwtvec,stimsy,stimseed+t,0) // Add info signal. Vary the random seed; don't use membranestim
+
+  if (t >= prosthesisstart) {
+    printf("Generating simultaneous prosthesis spikes\n")
+    prosspks = new Vector(infosiglength * prosfreq + 1) // Create Vector with one element per spike
+    prosspks.fill(1) // Fill with 1s so every timestep, there is an equal chance of causing a spike
+    membranestim = 1 // Direct current injection into the cell
+    poisadd(prosspks,time_1,time_2,prosfreq,cellpop,100,proswtvec,stimsy,stimseed+t,membranestim) // Add prosthesis spikes. Vary the random seed, and cause poisadd to remove effects of scaling when modelling the prosthesis weight (so the prosthesis can directly stimulate the 'cell membrane')
+  }
+
+  for i=0,numcols-1 {
+    col[i].cstim.pushspks()
+  }
+}
+
+
+proc write_scaling_data() { local k, id, act, trg, scl, type, dead
+
+  if (!header_written) {
+    // Write vars file header
+    varsFile.aopen()
+    varsFile.printf("# ************* Runtime params *************\n")
+ 
+    varsFile.printf("buffertime=%d\n", buffertime)
+    varsFile.printf("basetime=%d\n", basetime)
+    varsFile.printf("\n")
+
+    varsFile.printf("BaselineDur=%d\n",BaselineDur)
+    varsFile.printf("GetInfoDur=%d\n",GetInfoDur)
+    varsFile.printf("DeletionDur=%d\n",DeletionDur)
+
+    varsFile.printf("scalingstart=%d\n", scalingstart)
+    varsFile.printf("deletionstart=%d\n", deletionstart)
+    varsFile.printf("prosthesisstart=%d\n", prosthesisstart)
+    varsFile.printf("infotriallength=%d\n", infotriallength)
+    varsFile.printf("numinfotrials=%d\n", numinfotrials)
+    varsFile.printf("\n")
+
+    varsFile.printf("scaling=%d\n", scaling)
+    varsFile.printf("activitytau=%e\n", activitytau)
+    varsFile.printf("activitybeta=%e\n", activitybeta)
+    varsFile.printf("activitygamma=%e\n", activitygamma)
+    varsFile.printf("scaleexternal=%d\n", scaleexternal)
+    varsFile.printf("scaleexternalrate=%f\n", scaleexternalrate)
+    varsFile.printf("externalwtgain=%f\n", externalwtgain)
+    varsFile.printf("internalwtgain=%f\n", internalwtgain)
+    varsFile.printf("\n")
+
+    varsFile.printf("deleting=%d\n", deleting)
+    varsFile.printf("dynamicdelete=%d\n", dynamicdelete)
+    varsFile.printf("delspeed=%f\n", delspeed)
+    varsFile.printf("dynamicdelstep=%f\n", dynamicdelstep)
+    varsFile.printf("randomdelete=%d\n", randomdelete)
+    varsFile.printf("roulettewheelselection=%d\n", roulettewheelselection)
+    varsFile.printf("deletionstep=%d\n", deletionstep)
+    varsFile.printf("\n")
+            
+    varsFile.printf("numcells=%d\n", numcells)
+    varsFile.printf("recording_interval=%d\n", recording_interval)
+    varsFile.printf("t_start=%d\n", recording_start)
+    varsFile.printf("\n")
+
+    varsFile.printf("stimseed=%f\n", stimseed) // Info trial / prosthesis stim seed (alz.hoc)
+    varsFile.printf("inputseed=%f\n", inputseed) // External input seed (params.hoc)
+    varsFile.printf("pseed=%f\n", pseed) // Positioning seed (network.hoc)
+    varsFile.printf("dvseed=%f\n", dvseed) // Wiring seed (network.hoc)
+    varsFile.printf("stimpercent=%f\n", stimpercent)
+    varsFile.printf("stimsy=%d\n", stimsy)
+    varsFile.printf("stimfreq=%f\n", stimfreq)
+    varsFile.printf("stimwt=%f\n", stimwt)
+    varsFile.printf("infostimwt=%f\n", infostimwt)
+    varsFile.printf("prosfreq=%f\n", prosfreq)
+    varsFile.printf("proswt=%f\n", proswt)
+    varsFile.printf("useprosthesis=%d\n", useprosthesis)
+    varsFile.printf("useinfosignal=%d\n", useinfosignal)
+    varsFile.printf("\n")
+    varsFile.close()
+    header_written = 1
+  }
+  
+  // Open aux file for append
+  auxFile.aopen()
+
+  // Record current time
+  auxFile.printf("t = %f", t)
+  if (growthfactorscaling) {
+    auxFile.printf(",globalscale = %f", col.ce.o(0).update_global_scale_factor())
+  }
+  auxFile.printf("\n") // Newline
+
+  // Write data to given file
+  // Cell ID, cell type, activity sensor, target activity, scaling factor, is-dead
+  for k=0,numcells-1 {
+    id = col.ce.o(k).get_id()
+    act = col.ce.o(k).get_activity()
+    trg = col.ce.o(k).get_target_act()
+    fr = col.ce.o(k).get_firing_rate()
+    scl = col.ce.o(k).get_scale_factor()
+    type = col.ce.o(k).get_type()
+    dead = col.ce.o(k).get_dead()
+    auxFile.printf("%d,%d,%f,%f,%f,%f,%d\n", id,type,fr,act,trg,scl,dead)
+    //printf("%d,%d,%f,%f,%f,%d\n", id,type,act,trg,scl,dead)
+  }
+
+  // Close file
+  auxFile.close()
+  
+  // Queue next event
+  cvode.event(t+recording_interval, "write_scaling_data()")
+}
+
+
+// Callback procedure to start the event queue
+// Only called once, after hoc file initialised and run() has been called
+proc alzeventqueue() {
+  // Set up various events for Alzheimer's experiments
+
+  // DATA RECORDING
+  cvode.event(recording_start, "write_scaling_data()") // Start recording of scalefactors etc
+
+  // INFORMATION CONTRIBUTION TRIALS
+  if (GetInfoDur > 0) {
+    // Turn off E cells' external inputs, so only the information calculation signal is present
+    cvode.event(0, "scaleexternalwt(infotrialextwtgain)") // Set external input weights
+    cvode.event(0, "repeatinfotrial()") // Begin presentation of associative patterns
+    cvode.event(GetInfoDur, "restoreexternalwt(infotrialextwtgain)") // Restore external inputs gradually
+  }
+
+  // COMPENSATORY SYNAPTIC SCALING
+  if (scaling) {
+    cvode.event(scalingstart, "turn_on_scaling()") // Start scaling after initial delay to find activity
+  }
+
+  // CELL DELETION
+  if (deleting) {
+    if (dynamicdelete) {
+      cvode.event(deletionstart, "turn_on_dynamic_deletion()") // Allow cells to delete themselves
+    } else {
+      cvode.event(deletionstart, "deletionround()") // Start fixed-size batches of cell deletion
+    }
+  }
+  
+  // NEUROPROSTHESIS
+  if (useprosthesis) {
+    if (useinfosignal) {
+      setupinfosignal() // Set up rat LFP info signal as well as prosthesis
+      cvode.event(infosignalstart, "startinfosignalandprosthesis()")
+    } else {
+      cvode.event(prosthesisstart, "setprosthesis()") // Start prosthesis only
+    }
+  }
+}
+
+
+
+setup()
+declare("alzfih", new FInitializeHandler("alzeventqueue()")) // Called as soon as INIT finishes

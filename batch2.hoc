@@ -1,0 +1,70 @@
+// $Id: batch2.hoc,v 1.4 2011/08/24 02:05:24 samn Exp $ 
+
+// run this one with :
+// pbsb -s -ng -n 8 -i batch2.hoc
+
+// @TrainRate = (2,4,6,8,10,12,14,16)
+
+scale=4
+EEGain = 4*15/11/scale/2
+EIGain = 15/scale/2
+IEGain = 4*15/11/scale/2
+IIGain = 4*15/11/scale/2
+NMAMR = 0.25
+
+TargRate = TrainRate
+LearnDur = 60
+BaseDur = 60
+TrainW = 10
+SPECTY = 0
+
+plastEEmaxw = plastEImaxw = 10
+
+///
+//* setup
+xopen("/usr/site/nrniv/simctrl/hoc/setup.hoc")
+xopen("/usr/site/nrniv/simctrl/hoc/nrnoc.hoc")
+load_file("init.hoc")
+
+//* batch/logging related
+batch_flag=1
+
+strdef logstr
+objref bfile
+bfile=new File()
+proc logit () {
+  bfile.aopen("/u/samn/intfstdp/data/11aug23_batch_B.txt")
+  {bfile.printf($s1)  bfile.printf("\n") bfile.close()}
+}
+
+//* some params
+
+//* load correct version of sim
+
+strdef strrcs
+strrcs="nqsnet.hoc,65,network.hoc,178,params.hoc,214,run.hoc,63,nload.hoc,200,basestdp.hoc,191"
+rcsopen(strrcs)
+
+sprint(strv,"11aug23_TrainRate_%d_Batch2_",TrainRate)
+print "sim version: " , strv
+
+logit(strv) // write info to log
+
+//* post-sim-load modifications
+
+//* load data from sim that was already run
+// mytstop=tstop=htmax=10e3 // set to correct duration of sim that was run
+// loadminrundat(strv)
+
+//rcsopen("matspecplug.hoc",3) // does matspecgram, power fluctuation correlations + saves output
+
+//* run & save output
+//** main run/save
+// minrunsv(0,0) 
+myrunsv(strv)
+
+// savenqspec(strv)
+
+//* finish logging current run
+ print strv
+// {pravgrates(tstop,1,tstr) logstr=strv strcat(logstr,tstr) logit(logstr)}

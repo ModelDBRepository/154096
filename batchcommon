@@ -1,0 +1,46 @@
+#!/bin/sh
+# Common logic to take a selection of variables and values and spawn a load of relevant cluster jobs
+# Data will be saved at $datadir/$var$val/$seed by default using this script
+
+datadir="$1" # Base save path
+var="$2" # Parameter to vary
+vals="$3" # Array of values to assign to var
+initargs="$4" # Array of non-varying parameters (e.g. scaling=0)
+jobname="$5" # Job name
+seeds="$6" # Array of random seeds
+
+if [ "$seeds" = "" ]; then
+  #seeds="1 2 3 4 5 6 7 8 9 11 13 14 15 16 17 18 20 21 22 23" # Default set of 20 (excluding 10,12,19 due to bad wiring)
+  #seeds="31 32 33 34 35 36 37 38 39 40 41 42 43 44 45 46 47 48 49 50 51 52 53 54 55 56 57 58 59 60" # additional 30 runs
+  seeds="1 2 3 4 5 6 7 8 9 11 13 14 15 16 17 18 20 21 22 23 31 32 33 34 35 36 37 38 39 40 41 42 43 44 45 46 47 48 49 50 51 52 53 54 55 56 57 58 59 60" # all 50 runs
+fi
+
+##################################
+
+for seed in $seeds; do
+  for val in $vals; do
+
+    # Make savedir name
+    savepath="$datadir/$var$val/$seed"
+
+    # Create savedir
+    echo
+    echo "mkdir -p $savepath"
+    mkdir -p "$savepath"
+    
+    # Append seeds to 'args'
+    # randsy needs to be negative for normal-distribution randomisation
+    seedstring=" -c {inputseed=$seed} -c {pseed=$seed} -c {dvseed=$seed} -c {stimseed=$seed} -c {randsy=$seed*-1}"
+    args=$initargs$seedstring
+
+    export var
+    export val
+    export args
+    export savepath
+    export jobname
+
+    # Run sim
+    echo "msub -v var,val,args,savepath -o $savepath/$jobname.out -e $savepath/$jobname.err -N $jobname clusterrun.sh"
+    msub -v var,val,args,savepath -o $savepath/$jobname.out -e $savepath/$jobname.err -N $jobname clusterrun.sh
+  done
+done

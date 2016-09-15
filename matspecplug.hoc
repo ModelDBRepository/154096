@@ -1,0 +1,99 @@
+// $Id: matspecplug.hoc,v 1.3 2010/09/27 17:07:56 samn Exp $ 
+
+
+// "plugin" (for batch.hoc) to do analysis on sim data
+
+binsz = 5 // bin size in ms
+sampr = 1e3 / binsz // sampling rate
+initAllMyNQs() // initialize counts per time, by type, column, etc.
+
+objref nqs,nqtmp
+objref vintraty[numcols][CTYPi] // each type, within column
+objref vintraE[numcols]         // all Es within column
+objref vintraI[numcols]         // all Is within column
+objref vinterty[CTYPi]          // each type, across columns
+objref vinterE,vinterI          // all Es,Is across columns
+objref vty
+
+{vty=new Vector() vty.append(E2,I2)}
+
+sz=nqCTY[0].v[E2].size
+
+proc myrsz () { // util func to call matspecgram and add results to nqs
+  {vec.resize(0) vec.copy($o1) vec.sub(vec.mean)}
+  nqtmp=matspecgram(vec,sampr,sampr/2,0,0)
+  nqs.append($s2,nqtmp)
+  nqsdel(nqtmp)
+}
+
+obfunc mymuafcor () { local sz,i,j,a localobj v0,v1,mc
+  {a=allocvecs(v0,v1) sz=$o1.v.size mc=new Matrix(sz,sz)}
+  for i=0,sz-1 {
+    {v0.resize(0) v0.copy($o1.get("pow",i).o)}
+    for j=0,sz-1 {
+      {v1.resize(0) v1.copy($o2.get("pow",j).o)}
+      mc.x(i,j)=v0.pcorrel(v1)
+    }
+  }
+  {dealloc(a) return mc}
+}
+
+{nqs=new NQS("name","nqspec") nqs.strdec("name") nqs.odec("nqspec")}
+
+{vinterE=new Vector(sz) vinterI=new Vector(sz)}
+for i=0,CTYPi-1 if(col.numc[i]) vinterty[i]=new Vector(sz)
+for i = 0 , numcols - 1 { // setup all the vectors that will have matfftpow run on them
+  {vintraE[i]=new Vector(sz)  vintraI[i]=new Vector(sz)}
+  for j = 0, CTYPi - 1 {
+    if(nqCTY[i].v[j].size>0) {
+      
+      vintraty[i][j]=new Vector(sz)
+      vintraty[i][j].copy(nqCTY[i].v[j])
+      
+      vinterty[j].add(nqCTY[i].v[j])
+
+      if(ice(j)) {
+        vintraI[i].add(nqCTY[i].v[j])
+        vinterI.add(nqCTY[i].v[j])
+      } else {
+        vintraE[i].add(nqCTY[i].v[j])
+        vinterE.add(nqCTY[i].v[j])
+      }
+    }
+  }
+}
+
+myrsz(vinterE,"interE")
+myrsz(vinterI,"interI")
+
+for i=0,CTYPi-1 if(vinterty[i]!=nil && vty.contains(i)) {
+  sprint(tstr,"inter%s",CTYP.o(i).s) 
+  myrsz(vinterty[i],tstr)
+}
+
+for i=0,numcols-1 {
+  {sprint(tstr,"C%dintraE",i) myrsz(vintraE[i],tstr)}
+  {sprint(tstr,"C%dintraI",i) myrsz(vintraI[i],tstr)}
+  for j=0,CTYPi-1 if(vintraty[i][j]!=nil && vty.contains(j)) {
+    if(vintraty[i][j].size>0) {sprint(tstr,"C%dintra%s",i,CTYP.o(j).s) myrsz(vintraty[i][j],tstr)}
+  }
+}
+
+sprint(tstr,"/u/samn/intfcol/data/%s_nqspecg.nqs",strv)
+nqs.sv(tstr)
+
+objref nqmc,nqs1,nqs2,mc,vtmp
+strdef sc1,sc2
+{nqmc=new NQS("name1","name2","vpfc","sz","x01","x10") nqmc.strdec("name1") nqmc.strdec("name2") nqmc.odec("vpfc")}
+for(i=0;i<nqs.v.size;i+=2) {
+  {nqs1=nqs.get("nqspec",i).o  nqs2=nqs.get("nqspec",i+1).o}
+  {mc=mymuafcor(nqs1,nqs1)  vtmp=mat2vec(mc) sc1=nqs.get("name",i).s}
+  nqmc.append(sc1,sc1,vtmp,mc.nrow,mc.x(0,1),mc.x(1,0))
+  {mc=mymuafcor(nqs1,nqs2)  vtmp=mat2vec(mc) sc2=nqs.get("name",i+1).s}
+  nqmc.append(sc1,sc2,vtmp,mc.nrow,mc.x(0,1),mc.x(1,0))  
+}
+
+sprint(tstr,"/u/samn/intfcol/data/%s_nqspec_pfcor.nqs",strv)
+nqmc.sv(tstr)
+nqsdel(nqmc)
+nqsdel(nqs)

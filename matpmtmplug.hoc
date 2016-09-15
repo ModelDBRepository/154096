@@ -1,0 +1,42 @@
+// $Id: matpmtmplug.hoc,v 1.4 2011/02/28 06:07:42 samn Exp $ 
+
+// "plugin" (for batch.hoc) to do analysis on sim data
+
+binsz = 5 // bin size in ms
+sampr = 1e3 / binsz // sampling rate
+initAllMyNQs() // initialize counts per time, by type, column, etc.
+
+objref nqf,nqtmp
+objref vintraty[CTYPi] // each type, within column
+
+sz=nqCTY.v[E2].size
+
+proc myrsz () { // util func to call matpmtm and add results to nqf
+  {vec.resize(0) vec.copy($o1) vec.sub(vec.mean)}
+  nqtmp=matpmtm(vec,sampr)
+  {nqf.resize($s2) nqf.v[nqf.m-1].copy(nqtmp.getcol("pow"))}
+  nqsdel(nqtmp)
+}
+
+nqf=new NQS()
+
+for case(&j,E2,I2,I2L) {
+  vintraty[j]=new Vector(sz)
+  vintraty[j].copy(nqCTY.v[j])  
+}
+
+{vec.resize(0) vec.copy(nqLFP.v,500/vdt_INTF6,9.5e3/vdt_INTF6) vec.sub(vec.mean) nqtmp=matpmtm(vec,1e3/vdt_INTF6)}
+{nqf.resize("fLFP") nqf.v[nqf.m-1].copy(nqtmp.getcol("f"))}
+{nqf.resize("vLFP") nqf.v[nqf.m-1].copy(nqtmp.getcol("pow")) nqsdel(nqtmp)}
+
+//{vec.resize(0) vec.copy(vintraty[E2]) vec.sub(vec.mean) nqtmp=matpmtm(vec,sampr)}
+//{nqf.resize("fMUA") nqf.v[nqf.m-1].copy(nqtmp.getcol("f"))}
+//{nqf.resize("E2MUA") nqf.v[nqf.m-1].copy(nqtmp.getcol("pow")) nqsdel(nqtmp)}
+
+//myrsz(vintraty[I2],"I2MUA")
+//myrsz(vintraty[I2L],"I2LMUA")
+
+sprint(tstr,"/u/samn/intfnest/data/%s_nqpmtmpow_B.nqs",strv)
+nqf.sv(tstr)
+if(batch_flag) nqsdel(nqf)
+

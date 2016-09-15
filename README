@@ -1,0 +1,123 @@
+Introduction:
+-------------
+This is the source code for the model which was used in the paper
+"Electrostimulation to reduce synaptic scaling driven progression of
+Alzheimer's disease" by Mark Rowan, Samuel Neymotin and Bill Lytton.
+Front Comput Neurosci (2014) 8:39
+http://dx.doi.org/10.3389/fncom.2014.00039
+
+Abstract:
+---------
+Cell death and synapse dysfunction are two likely causes of cognitive
+decline in AD.  As cells die and synapses lose their drive, remaining
+cells suffer an initial decrease in activity.  Neuronal homeostatic
+synaptic scaling then provides a feedback mechanism to restore
+activity.  This homeostatic mechanism is believed to sense levels of
+activity-dependent cytosolic calcium within the cell and to adjust
+neuronal firing activity by increasing the density of AMPA synapses at
+remaining synapses to achieve balance.  The scaling mechanism
+increases the firing rates of remaining cells in the network to
+compensate for decreases in network activity.  However, this effect
+can itself become a pathology, as it produces increased imbalance
+between excitatory and inhibitory circuits, leading to greater
+susceptibility to further cell loss via calcium-mediated
+excitotoxicity.  Here, we present a mechanistic explanation of how
+directed brain stimulation might be expected to slow AD progression
+based on computational simulations in a 470-neuron biomimetic model of
+a neocortical column.  The simulations demonstrate that the addition
+of low-intensity electrostimulation (neuroprosthesis) to a network
+undergoing AD-like cell death can raise global activity and break this
+homeostatic-excitotoxic cascade.  The increase in activity within the
+remaining cells in the column results in lower scaling-driven AMPAR
+upregulation, reduced imbalances in excitatory and inhibitory
+circuits, and lower susceptibility to ongoing damage.
+
+Usage:
+------
+To generate data for the figures in the paper, follow the instructions
+under 'compiling' (below) then run the relevant commands from the
+following list. Be aware that most of the experiments will take a
+couple of days to run and will produce large amounts of data (> 2GB)
+due to the very long amounts of time being simulated (~44 hours).
+
+Compiling:
+----------
+Linux: Change to the 'mod' directory and run the command 'mkmod' to
+build the necessary .mod files.
+
+Figures:
+--------
+Figure 5
+batchscripts/experiments/0deletionNoscaling.sh
+batchscripts/experiments/1AD.sh
+python plotavg.py rowanms-data/neurostim/0deletionNoscaling activity noinhib: scale noinhib
+python plotavg.py rowanms-data/neurostim/1AD/ activity noinhib: scale noinhib
+
+
+Figure 6/7
+batchscripts/experiments/3ADprosfreq.sh
+batchscripts/experiments/3ADproswt.sh
+python plotdeletions.py rowanms-data/neurostim/3ADprosfreq
+python plotdeletions.py rowanms-data/neurostim/3ADproswt
+python plotavg.py rowanms-data/neurostim/3ADprosfreq/proswt0 activity noinhib: scale noinhib
+python plotavg.py rowanms-data/neurostim/3ADprosfreq/proswt2 activity noinhib: scale noinhib
+
+Figure 8/9
+batchscripts/experiments/4localADprosfreq.sh
+batchscripts/experiments/4localADproswt.sh
+python plotdeletions.py data/4localADprosfreq
+python plotdeletions.py data/4localADproswt
+python plotavg.py rowanms-data/neurostim/4loclaADprosfreq/proswt0 activity noinhib: scale noinhib
+python plotavg.py rowanms-data/neurostim/4localADprosfreq/proswt2 activity noinhib: scale noinhib
+
+Figure 10
+batchscripts/experiments/6testinfo.sh
+python plotntes.py rowanms-data/neurostim/6testinfo/proswt2 1
+python plotntes.py rowanms-data/neurostim/6testinfo/proswt2 2
+python plotntes.py rowanms-data/neurostim/6testinfo/proswt2 3
+
+Figure 11
+batchscripts/experiments/7ADinfo.sh
+python plotntes.py rowanms-data/neurostim/7ADinfowt/proswt0 1
+python plotntes.py rowanms-data/neurostim/7ADinfowt/proswt0 100
+python plotntes.py rowanms-data/neurostim/7ADinfowt/proswt2 100
+python plotdeletions.py rowanms-data/neurostim/7ADinfowt
+
+
+
+Running custom sims:
+--------------------
+Execute the simulation directly using ./runsim.sh [savepath] [optional args]
+
+  where [optional args] is a list such as "{variable=value
+  other_variable=value}" e.g. "{strdef simfilename
+  simfilename="stdp_scaling.hoc"}" (which runs STDP sim)
+
+
+Batch runs:
+-----------
+To run multiple experiments in a batch on a cluster (e.g. to get
+results over various different values of activitytau), create a basic
+script in batchscripts and fill in the variable name, values, and
+optional arguments. (See the scripts already inside batchscripts for
+examples). This is currently set up to use a GridEngine cluster, but
+you can edit clusterrun.sh to change cluster settings.
+
+To execute:
+
+  batchscripts/<script>
+
+To run all scripts in a directory:
+
+  run-parts batchscripts/<directory>/
+
+
+Code hierarchy:
+---------------
+batchscripts/<script>
+ |_ batchcommon
+   |_ clusterrun.sh
+     |_ runsim.sh
+       |_ sim.hoc
+         |  sim setup files
+         |  alz.hoc

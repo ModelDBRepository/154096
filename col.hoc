@@ -1,0 +1,841 @@
+// $Id: col.hoc,v 1.103 2012/04/21 04:04:23 samn Exp $ 
+
+print "Loading col.hoc..."
+
+//* globals
+{declare("UNIF",0)}    //use roughly uniform prob. distrib for div
+{declare("NEGEXP",1)}  //use neg exp. with mean=div prob. distrib in setdvi
+{declare("PARETO",2)}  //use pareto (scalefree) distrib with mean=div prob., shape=2
+{declare("NORM",3)}    //use normal distrib with mean=div, stdev=div/5
+{declare("DVFIXED",4)} //use fixed divergence ( no variability )
+{declare("PARETOSH",4.5)}//shape for pareto (scalefree) distrib -- low value will produce fatter/higher tails
+
+//* template CSTIM
+begintemplate CSTIM
+
+double wmatex[1][1],ratex[1][1],EIBalance[1]
+public wmatex,ratex,setwm,vq,col,sgrhzdel,sgrdur,setspks,pushspks,savewt,restorewt,turnoff,mulwts,sgrdel,EIBalance,shock
+external CTYP,CTYPi,STYPi,AM,AM2,NM,NM2,GA,GA2,case,nil,allocvecs,dealloc,nqsdel
+objref this,vq,col,vsgrpp,vsgrsidx,vwt
+double iseed[1],sgrhzdel[1],sgrdur[1],sgrdel[1],usens[1],sseed[1]
+objref ncl,nsl,rsl,vrse // <-- objects for external inputs via NetCon(ncl)+NetStim(nsl) 
+// with Random(rsl), Random sead(vrse)
+public ncl,nsl,rsl,vrse,usens,sgrcells,initrands,jitterspks,sseed,iseed
+
+//* clrwm - reset wmatex to 0
+proc clrwm () { local ct,sy
+  for ct=0,CTYPi-1 for sy=0,STYPi-1 wmatex[ct][sy]=0
+}
+//* new CSTIM(COLUMN,iseed,sgrdur[,sgrhzdel,EIBalance,usens])
+// iseed = seed for random # generator, sgrdur = duration of persistent stims
+// sgrhzdel = variability of stim rates, EIBalance = make E,I inputs balanced
+// usens = whether to use NetStim instead of vq for persistent stims
+proc init () { 
+  double wmatex[CTYPi][STYPi]
+  double ratex[CTYPi][STYPi]
+  double EIBalance[1]
+  clrwm() col=$o1 col.cstim=this
+  if(numarg()>1) iseed=$2 else iseed=1234
+  sgrdur=$3 sgrdel=0
+  vsgrpp=new Vector(CTYPi) //% X 100 of cells of a type to stim, used in stim,sgrcells
+  vsgrsidx=new Vector(CTYPi) //startind index of cell to stim when using topstim
+  vq=new NQS("ind","time","wt","sy")
+  if(numarg()>3)sgrhzdel=$4 else sgrhzdel=0.2
+  if(numarg()>4)EIBalance=$5 else EIBalance=0
+  if(numarg()>5)usens=$6 else usens=0
+}
+
+//** setwm - set weights of external inputs to INTF6s
+proc setwm () {  local i,sz,ct,sy localobj nq,vct,vsy,vw,vr
+  {nq=$o1 nq.tog("DB") vct=nq.getcol("ct")}
+  {vsy=nq.getcol("sy") vw=nq.getcol("w") vr=nq.getcol("rate")}
+  for ct=0,CTYPi-1 for sy=0,STYPi-1 wmatex[ct][sy]=ratex[ct][sy]=0
+  for i=0,nq.v.size-1 {
+    wmatex[vct.x(i)][vsy.x(i)]=vw.x(i)
+    ratex[vct.x(i)][vsy.x(i)]=vr.x(i)
+  }
+}
+//** setspks([checkdup]) - set time of the external inputs to cells, can still call shock later
+// optional checkdup arg specifies whether to check for & correct consecutive duplicate spike times
+// checkdup only makes sense when vq is not empty (i.e. when NOT using NetStim)
+proc setspks () { local cd,se,ndx localobj rdm,ce,intf
+  ce=col.ce if(numarg()>0) cd=$1 else cd=0
+  if(ce.count<=0) { //need INTFs to stim
+    printf("CSTIM: no cells to stim!\n")
+    return
+  }
+  intf=ce.o(0) rdm=new Random() rdm.ACG(iseed) //initialize Random object
+  if(vq==nil) vq=new NQS("ind","time","wt","sy") else vq.clear() //NQS storing INTF6 spike times
+  intf.clrvspks() //clear INTF6 spike times
+  if(sgrdur>0) {
+    if(usens) nsstim(rdm) else popstim(rdm) //add random firing of INTF6 cells
+  }
+  if(vq.v.size>0) pushspks(cd)
+}
+//** checkcdups - checks for consecutive duplicate spike times
+proc checkcdups () { local a,ii,lastval localobj v1
+  a=allocvecs(v1)
+  v1.copy(vq.getcol("time")) // get the times to allow checks
+  lastval = -1.0
+  for ii=0,v1.size()-1 {
+    if (v1.x(ii) == lastval) {
+      printf("ERROR: spike time duplicate at %f (row #%d)\n", v1.x(ii), ii)
+      // If we can, change the spike time to the average of the current one and the one just ahead.
+      if (v1.x(ii+1) > v1.x(ii)) v1.x(ii) = (v1.x(ii) + v1.x(ii+1)) / 2.0
+    }
+    lastval = v1.x(ii)
+  }
+  vq.v[1].copy(v1)        // copy the fixed time vector back
+  dealloc(a)
+}
+//** pushspks([checkdup]) - finalize spike times to INTF6 cells
+// (useful, since after calls to shock/pulsestim, vq is modified)
+// optional checkdup arg specifies whether to check for & correct consecutive duplicate spike times
+proc pushspks () { local cd localobj ce,intf
+  if(numarg()>0) cd=$1 else cd=0
+  ce=col.ce intf=ce.o(0)
+  intf.clrvspks()
+  vq.sort("time") vq.sort("ind") //finalize INTF6 spike times
+  if(cd) checkcdups()
+  intf.initvspks(vq.v,vq.v[1],vq.v[2],vq.v[3]) // single global call
+}
+//** jitterspks([jmin,jmax,seed]) - add jitter to spike times to avoid redundant spikes
+// jmin,jmax are min,max jitters to add, seed is random # seed
+proc jitterspks () { local a,jmin,jmax,seed localobj v1,rdm
+  a=allocvecs(v1)
+  if(numarg()>0) jmin=$1 else jmin=0
+  if(numarg()>1) jmax=$2 else jmax=1e-6
+  if(numarg()>2) seed=$3 else seed=1234
+  rdm=new Random()
+  rdm.ACG(seed)
+  rdm.uniform(jmin,jmax)
+  v1.resize(vq.v.size)
+  v1.setrand(rdm)  
+  vq.v[1].add(v1)
+  pushspks()
+  dealloc(a)
+}
+//** savewt - initialize temporary storage space to allow modifications to vq weight column
+proc savewt () {
+  if(vwt==nil) vwt=new Vector(vq.v.size)  
+  vwt.copy(vq.v[vq.fi("wt")])
+}
+//** restorewt - restore weights in vq to original values
+proc restorewt () {
+  if(vwt==nil) return
+  vq.v[vq.fi("wt")].copy(vwt)
+  vwt.resize(0)
+  pushspks()
+}
+//** mulwts(celltype,synapsetype,scaling factor,[skippush]) - scale weights of cell and synapse type by factor
+proc mulwts () { local ct,sy,fctr,i,j localobj ce
+  ct=$1 sy=$2 fctr=$3 ce=col.ce vq.select(-1,"sy",sy)
+  for i=0,vq.ind.size-1 {j=vq.ind.x(i) 
+    if(ce.o(vq.v[0].x(j)).type==ct) vq.v[2].x(j)*=fctr
+  }
+  if(numarg()>3) { if(!$4) pushspks() } else pushspks()
+}
+//** turnoff(celltype,synapsetype,[skippush]) - turn off spikes by setting weights to 0
+proc turnoff () { 
+  if(numarg()>2) mulwts($1,$2,0,$3) else mulwts($1,$2,0)
+}
+//** pulsestim(rate[,maxt,clear,seed]) - stim using pulses @ specified rate - doesn't work correctly now
+proc pulsestim () { local nspk,tt,i,j,nrate,ti,maxt localobj rdp,vqtmp
+  rdp=new Random()   nrate=$1
+  if(numarg()>1) maxt=$2 else maxt=tstop
+  if(numarg()>2) {
+    if($3) vq.clear() 
+  } else vq.clear()  
+  if(numarg()>3) rdp.ACG($4) else rdp.ACG(1234)
+  vqtmp=new NQS()
+  tt=1 rdp.poisson(1000/nrate)
+  while(tt<=maxt) {
+    ti=0
+    while(ti <= 0) ti=rdp.repick()    
+    shock()
+    vq.getcol("time").add(tt)
+    if(vqtmp.size(-1)==0) vqtmp.cp(vq) else vqtmp.append(vq)
+    print tt
+    tt += ti
+  }
+  vq.cp(vqtmp) nqsdel(vqtmp)
+  vq.sort("time") vq.sort("ind")
+  col.ce.o(0).initvspks(vq.v,vq.v[1],vq.v[2],vq.v[3])
+}
+
+//** initrands() - initialize Random # objects used by NetCon/NetStim for external inputs
+// this function should be called in init -- at the start of each run to ensure same random # stream each time
+proc initrands () { local i,se localobj rds
+  if(vrse==nil) return  
+  for i=0,vrse.size-1 {
+    rds = rsl.o(i)       // go thru Random objects 
+    se = vrse.x(i)       // seed previously used
+    rds.MCellRan4(se,se) // initialize MCellRan4 Random # generator
+    rds.negexp(1)        // must be called this way 
+  }
+}
+
+//** nsstim(Random) - setup random external inputs via NetStims
+proc nsstim () { local a,sy,sdx,idx,sglo,sghi,hzlo,hzhi,ct,se localobj rdm,vsy,vhz,nc,ns,rds
+  a=allocvecs(vsy,vhz)
+  rdm=$o1  vsy.append(GA) vsy.append(GA2) vsy.append(AM2) vsy.append(NM2)
+  sglo=1-sgrhzdel sghi=1+sgrhzdel if(sglo<0) sglo=0
+  {nsl=new List() ncl=new List() rsl=new List() vrse=new Vector() se=iseed}
+  for sdx=0,vsy.size-1 { sy=vsy.x(sdx) // go through synapse types
+    for ct=0,CTYPi-1 if(col.numc[ct] && wmatex[ct][sy] && ratex[ct][sy]) {//go through cell types, check weights,rates of inputs
+      vhz.resize(col.numc[ct]) //set vector to # of cells of type ct
+      {hzlo=MAXxy(ratex[ct][sy]*sglo,1) hzhi=MAXxy(ratex[ct][sy]*sghi,1)}//find min,max frequencies
+      rdm.discunif(hzlo,hzhi) //set random # generator to frequency btwn hzlo,hzi
+      vhz.setrand(rdm) //set rate of inputs to each synapse
+      for idx=col.ix[ct],col.ixe[ct] { // for each cell of type ct (idx is id of the cell)
+
+        nsl.append( ns = new NetStim(0.5) ) // NetStim is source
+        ns.number = int( 0.5 + vhz.x(idx-col.ix[ct]) * sgrdur / 1e3 ) // # of inputs
+        ns.start = sgrdel // approx start of first input
+        ns.noise = 1 // make it fully random
+        ns.interval = 1e3 / vhz.x(idx-col.ix[ct]) // avg interval btwn the inputs
+
+        rsl.append( rds = new Random() )
+        rds.negexp(1) // set random # generator using negexp(1) - avg interval in NetStim.interval
+        rds.MCellRan4(se,se)  // seeds are in order, shouldn't matter
+        ns.noiseFromRandom(rds) // use random # generator for this NetStim
+        vrse.append(se) // save random # seed
+
+        ncl.append( nc = new NetCon(ns,col.ce.o(idx)) ) // set the connection (netstim->postsynaptic INTF6 cell)
+        nc.delay = 0
+        nc.weight(sy) = wmatex[ct][sy]
+
+        se += 10 // increment seed for NetStim random # generator
+      }
+    }  
+  }    
+  dealloc(a)
+}
+
+//** popstim(Random) - setup random external synaptic inputs 
+proc popstim () { local a,se,sy,sz,sdx,idx,jdx,pos,sglo,sghi,hzlo,hzhi,nspk,ct,mxr localobj rdm,vsy,vnspks,vtmp,vfctr
+  a=allocvecs(vsy,vnspks,vtmp,vfctr)
+  rdm=$o1  vsy.append(GA) vsy.append(GA2) vsy.append(AM2) vsy.append(NM2)
+  pos=mxr=0 sglo=1-sgrhzdel sghi=1+sgrhzdel if(sglo<0) sglo=0
+  for ct=0,CTYPi-1 for sy=0,STYPi-1 mxr=MAXxy(mxr,ratex[ct][sy])
+  vq.pad(mxr*sghi*col.allcells*vsy.size*sgrdur/1e3)
+  if(EIBalance) { vfctr.resize(col.allcells) // flag for excit/inhib inputs to be balanced
+    {rdm.uniform(sglo,sghi) vfctr.setrand(rdm) jdx=pos=0}
+    for idx=0,col.allcells-1 { ct=col.ce.o(idx).type
+      for sdx=0,vsy.size-1 { sy=vsy.x(sdx)
+        if(wmatex[ct][sy] && ratex[ct][sy]) {
+          if((nspk=int(ratex[ct][sy]*vfctr.x(idx)*sgrdur/1e3))<1) {nspk=1}
+          vq.v[0].fill(idx,pos,pos+nspk-1)
+          if(sy==GA||sy==GA2) {
+            vq.v[2].fill(-wmatex[ct][sy],pos,pos+nspk-1)
+          } else vq.v[2].fill(wmatex[ct][sy],pos,pos+nspk-1)
+          vq.v[3].fill(sy,pos,pos+nspk-1)
+          pos += nspk
+        }
+      }
+    }
+  } else { // default here
+    for sdx=0,vsy.size-1 { sy=vsy.x(sdx) // go through synapse types
+      for ct=0,CTYPi-1 if(col.numc[ct] && wmatex[ct][sy] && ratex[ct][sy]) {//go through cell types, check weights,rates of inputs
+        vnspks.resize(col.numc[ct]) //set vector to # of cells of type ct
+        {hzlo=MAXxy(ratex[ct][sy]*sglo,1) hzhi=MAXxy(ratex[ct][sy]*sghi,1)}//find min,max frequencies
+        rdm.discunif(hzlo,hzhi) //set random # generator to frequency btwn hzlo,hzi
+        {vnspks.setrand(rdm) vnspks.mul(sgrdur/1e3) vnspks.apply("int")} //set # of spikes per intf in vnspks
+        jdx = 0 // pointer into vnspks
+        for idx=col.ix[ct],col.ixe[ct] { // for each cell of type ct (idx is id of the cell)
+          vq.v[0].fill(idx,pos,pos+vnspks.x(jdx)-1) //fill vq.v[0] with ID of cell
+          if(sy==GA||sy==GA2) { //is synapse inhibitory? if so, use negative weights
+            vq.v[2].fill(-wmatex[ct][sy],pos,pos+vnspks.x(jdx)-1)
+          } else vq.v[2].fill(wmatex[ct][sy],pos,pos+vnspks.x(jdx)-1) //use positive weights for excit. synapses
+          vq.v[3].fill(sy,pos,pos+vnspks.x(jdx)-1)//fill corresponding entries in vq.v[3] with synapse type
+          pos += vnspks.x(jdx) //increment pointer into vq row
+          jdx += 1 //move jdx to next cell
+        }
+      }  
+    }    
+  }
+  vq.pad(pos)//set all vq vectors to right size
+  rdm.uniform(sgrdel,sgrdel+sgrdur) vq.v[1].setrand(rdm) // set times of inputs in vq.v[1]
+  dealloc(a)
+}
+
+//** shock(duration,percent,type[,time,seed,sy,wt])
+// shock random % of cells
+// single shock so duration means it spreads it out over eg 5 ms in terms of delivery to different cells
+// % > 100 means multiple stime eg 200% will stim each cell 2 times in that interval
+// sy specifies which synapse to stim, default is AM2
+// wt specifies weight of inputs -- default is 1e9 for guaranteed spiking @ AM2 synapses. otherwise
+// will provide a wt-dependent stim
+proc shock () { local ct,startt,sy,wt
+  if(numarg()>3) startt=$4 else startt=0
+  if(numarg()>4) mc4seed_stats(sseed=$5) else mc4seed_stats(sseed=59743)
+  if(numarg()==7) {
+    {sy=$6    wt=$7   sgrcells($1,$2,$3,startt,1,0,sy,wt)}
+  } else sgrcells($1,$2,$3,startt)
+}
+
+//* sgrcells(dur,percent,stimcelltype,starttime[,burst#,ISI,sy,wt]) - stim the cells
+//  sgrcells(dur,percent,stimcelltype,starttime[,burst#,ISImin,ISImax])
+// if numarg == 8, uses specified sy,wt for sub-threshold stim
+proc sgrcells () { local ii,sgrdur,sgrpp,sgrpsz,stimcc,startt,a,bst,sy,wt localobj v1,v2,v3,vqtmp,dnq,vid,str
+  if (vq==nil) vq=new NQS("ind","time","wt","sy")
+  sgrdur=$1 sgrpp=$2 stimcc=$3 startt=$4 str=new String()
+  a=allocvecs(v1,v2,v3)
+  bst=1 v3.resize(bst) // number of spikes/cell -- default 1
+  if (argtype(5)==0) { 
+    bst=$5 v3.resize(bst) 
+    if (argtype(7)==0) { v3.setrnd(4.5,$6,$7,sseed) // interval of intervals
+    } else if (argtype(6)==0) { v3.fill($6)
+    } else v3.fill(4) // default 250 Hz without randomization
+  }
+  if(numarg()==8) {sy=$7 wt=$8 } else {sy=AM2 wt=1e9} // use specified wt,sy?
+  v3.x[0]=0.0 // so first one delivered at start time
+  vqtmp=new NQS("ind","time","wt","sy")
+  sgrpsz=int(sgrpp*col.numc[stimcc]/100)
+  v1.resize(sgrpsz)
+  if(dnq==nil){
+    if(sgrpp<=100){
+      v1.setrnd(6,col.ix[stimcc],col.ixe[stimcc],sseed)//unique random ints in range
+    } else v1.setrnd(5,col.ix[stimcc],col.ixe[stimcc],sseed)//nonunique since >= 100 %
+  } else {
+    if(col.div[stimcc][stimcc][0]>0)sprint(str.s,"to%s",CTYP.o(stimcc).s) else str.s="toE4"
+    {dnq.select("type",stimcc) dnq.sort(str.s) vid=dnq.getcol("id")}
+    if(topstim){
+      v1.copy(vid,vsgrsidx.x(stimcc),vsgrsidx.x(stimcc)+sgrpsz-1)
+    } else v1.copy(vid,0,sgrpsz-1)
+  }
+  v2.resize(v1.size) // same size as v1
+  v2.setrnd(4.5,startt,startt+sgrdur,sseed)// at some random time between startt and startt+sgrdur
+  for ii=1,bst {vqtmp.v[0].append(v1) vqtmp.v[1].append(v2.add(v3.x[ii-1]))}
+  {vqtmp.pad() vqtmp.v[2].fill(wt) vqtmp.v[3].fill(sy) } 
+  vq.append(vqtmp) // need to call pushspks after call to shock/sgrcells
+  dealloc(a)
+  nqsdel(vqtmp)
+}
+
+endtemplate CSTIM
+
+//* template COLUMN
+begintemplate COLUMN
+
+external UNIF,NEGEXP,PARETO,NORM,DVFIXED,PARETOSH
+external CTYPi,STYPi,ice,DEND,SOMA,IsLTS,CTYP,STYP,allocvecs,vrsz,dealloc,nil,NM,NM2,AM,AM2,GA,GA2,vlk,nqsdel
+
+double numc[50]
+double ix[50],ixe[50] //start,end IDs of types in a column
+double div[50][50]//div[i][j]==# of outputs from type i->j
+double wmat[50][50][25] // wmat[i][j][k]==weight from type i->j for synapse k
+double wd0[50][50][25] // wmat[i][j][k]==weight from type i->j for synapse k
+double delm[50][50]//avg. delay from type i->j
+double deld[50][50]//delay variance from type i->j
+double conv[50][50]
+double pmat[50][50]
+double synloc[50][50]//location of synapses
+double allcells[1],ecells[1],icells[1],setdviPT[1],dgcor[1],xpos[1],ypos[1],wseed[1],verbose[1]
+double syty1[50][50] //synapse type lookup table
+double syty2[50][50] //synapse type lookup table
+double cside[1] // column diameter, in swire
+double pseed[1] // positioning seed, in swire
+double zvar[1] // z variance, when using swire
+
+public id,wmat,wd0,pmat,wire,wirenq,div,delm,deld,conv,numc,setdviPT,allcells,ecells,icells,xpos,ypos,wire2col
+public setwmat,setpmat,setdelmats,setsynloc,ix,ixe,cstim,defsynloc,wseed,verbose,syty1,syty2,synloc
+public mknetnqss,version
+objref this,ce,intf,cstim
+objref cellsnq,connsnq,xcolconnsnq
+strdef name
+public ce,intf,allwtsoff,allwtson,inhibon,inhiboff,name
+public ctt,cttr,stt
+public cellsnq,connsnq,xcolconnsnq,mkcellsnq
+public cside,pseed,zvar
+public setcellpos,swire,swire2col
+
+proc setstim () {
+}
+
+//** allwtson -- turn all internal weights on
+proc allwtson () { local i,j,s
+  if(wsetting_INTF6 == 1) {
+    print "allwtson ERR: can't return weights with wsetting_INTF6==1 !"
+  } else for i=0,CTYPi-1 for j=0,CTYPi-1 for s=0,STYPi-1 if(wmat[i][j][s]>0) wd0[i][j][s]=1
+}
+
+//** allwtsoff -- turn all internal weights off
+proc allwtsoff () { local i,j,s,a localobj vwt,cel
+  if(wsetting_INTF6 == 1) {
+    print "allwtsoff WARN: will lose sywv values, wsetting_INTF6==1 !"
+    a=allocvecs(vwt)
+    for i=0,ce.count-1 { cel=ce.o(i)
+      vwt.resize(cel.getdvi())
+      vwt.fill(0)
+      cel.setsywv(vwt,vwt)
+    }
+    dealloc(a)
+  } else for i=0,CTYPi-1 for j=0,CTYPi-1 for s=0,STYPi-1 wd0[i][j][s]=0
+}
+
+// ** inhiboff -- turn inhibition off -- only call after setting up network
+proc inhiboff () { local i,from,to
+  for i=0,allcells-1 if(ice(ce.o(i).type)) ce.o(i).prune(1) //prune all inhib cells
+  for from=0,CTYPi-1 if(ice(from)) for to=0,CTYPi-1 wd0[from][to][GA]=0
+}
+
+// ** inhibon -- turn inhibition on
+proc inhibon () { local i,from,to
+  for i=0,allcells-1 if(ice(ce.o(i).type)) ce.o(i).prune(0) //unprune all inhib cells
+  for from=0,CTYPi-1 if(ice(from)) for to=0,CTYPi-1 wd0[from][to][GA]=1
+}
+
+//** getNdv - gets # of outputs based on divergence settings, always returns at least 1
+// $o1 = random object, $2 = avg. # of outputs
+func getNdv () { local dv,N localobj rdm
+  rdm=$o1 dv=$2
+  if(setdviPT==PARETO) {
+    rdm.avg=dv N=int(rdm.pick+0.5)
+  } else if(setdviPT==NEGEXP) {
+    N=int(rdm.negexp(dv)+0.5)
+  } else if(setdviPT==UNIF) {
+    N=int(rdm.uniform(dv-.2*dv,dv+.2*dv)+0.5)
+  } else if(setdviPT==NORM) {
+    N=int(rdm.normal(dv,(dv/4)^2)+0.5)
+  } else if(setdviPT==DVFIXED) {
+    return dv
+  }
+  if(N<1)N=1 
+  return N
+}
+
+//** defsynloc - set default values in synloc
+proc defsynloc () { local from,to
+  for from=0,CTYPi-1 for to=0,CTYPi-1 {
+    if(ice(from)) {
+      if(IsLTS(from)) {
+        synloc[from][to]=DEND // distal [GA2] - from LTS
+      } else {
+        synloc[from][to]=SOMA // proximal [GA] - from FS
+      }
+    } else synloc[from][to]=DEND // E always distal. use AM2,NM2
+  }
+}
+
+//** setsynloc - sets synapse location - not modifiable for now
+proc setsynloc () { local i,sz,from,to,sy localobj nq,vfrom,vto,vloc
+  if(numarg()==0) {
+    defsynloc()
+  } else {
+    {nq=$o1 nq.verbose=0 nq.select("dist",0)}
+    {vfrom=nq.getcol("from") vto=nq.getcol("to") vloc=nq.getcol("loc")}
+    sz=vfrom.size
+    for i=0,sz-1 synloc[vfrom.x(i)][vto.x(i)]=vloc.x(i)
+    {nq.tog("DB") nq.verbose=1}
+  }
+}
+
+//** prdiv - prints div info
+proc prdiv () { local i,j,k
+  for i=0,CTYPi-1 for j=0,CTYPi-1 for k=0,STYPi-1 if(wmat[i][j][k]>0) if(div[i][j]) {
+    printf("div[%s][%s]=%g\n",CTYP.o(ii).s,CTYP.o(jj).s,div[ii][jj])
+  }
+}
+
+//** scalepmat - scales entries in pmat by $1
+proc scalepmat () { local fctr,from,to
+  fctr=$1
+  for from=0,CTYPi-1 for to=0,CTYPi-1 pmat[from][to] *= fctr
+}
+
+//** clrpmat - sets pmat entries to 0
+proc clrpmat () { local from,to
+  for from=0,CTYPi-1 for to=0,CTYPi-1 pmat[from][to]=0 // clear it
+}
+
+//** setpmat(nqs with from,to,pij columns) - from=presynaptic type,
+// to=postsynaptic type, pij=connection probability
+proc setpmat () { local i,sz,from,to localobj nq,vfrom,vto,vpij
+  {nq=$o1 nq.verbose=0 nq.select("dist",0)}
+  clrpmat() // clear it
+  {vfrom=nq.getcol("from") vto=nq.getcol("to") vpij=nq.getcol("pij")}
+  sz=vfrom.size
+  for i=0,sz-1 pmat[vfrom.x(i)][vto.x(i)]=vpij.x(i)
+  setdivmat() // set divergence vectors based on pmat
+  {nq.tog("DB") nq.verbose=1}
+}
+
+//** setdivmat - sets div/conv based on values in pmat
+proc setdivmat () { local from,to,cl
+  for from=0,CTYPi-1 for to=0,CTYPi-1 if(pmat[from][to]) {
+    div[from][to] =  ceilg(pmat[from][to]*numc[to])
+    conv[from][to] = int(0.5 + pmat[from][to]*numc[from])
+  }
+}
+
+//** clrwmat - sets wmat entries to 0
+proc clrwmat () { local from,to,sy
+  for from=0,CTYPi-1 for to=0,CTYPi-1 for sy=0,STYPi-1 wmat[from][to][sy]=0
+}
+//** clrwmd0 - sets wd0 entries to 0
+proc clrwd0 () { local from,to,sy
+  for from=0,CTYPi-1 for to=0,CTYPi-1 for sy=0,STYPi-1 wd0[from][to][sy]=0
+}
+
+//** clrsyty - sets syty1,sty2 entries to -1
+proc clrsyty () { local from,to
+  for from=0,CTYPi-1 for to=0,CTYPi-1 syty1[from][to]=syty2[from][to]=-1
+}
+
+//** setwmat(nqs with from,to,sy,w columns) - from=presynaptic type,
+// to=postsynaptic type, sy=synapse type, w=weight
+proc setwmat () { local i,sz,from,to,sy localobj nqwm,vfrom,vto,vsy,vw
+  {nqwm=$o1 nqwm.verbose=0 nqwm.select("dist",0) clrwmat() clrwd0()}
+  {vfrom=nqwm.getcol("from") vto=nqwm.getcol("to")}
+  {vsy=nqwm.getcol("sy") vw=nqwm.getcol("w") sz=vfrom.size}
+  for i=0,sz-1 { 
+    {sy=vsy.x(i) from=vfrom.x(i) to=vto.x(i)}
+    {wmat[from][to][sy]=vw.x(i) wd0[from][to][sy]=1}
+    if(sy==NM2) syty2[from][to]=sy else syty1[from][to]=sy
+  }
+  {nqwm.tog("DB") nqwm.verbose=1}
+}
+
+//** setdelmats(nqs with from,to,delm,deld columns) - from=presynaptic type,
+// to=postsynaptic type, sy=synapse type, delm=avg. delay, deld=variation in delay
+proc setdelmats () {  local i,sz,from,to localobj nq,vfrom,vto,vdelm,vdeld
+  {nq=$o1 nq.verbose=0 nq.select("dist",0)}
+  {vfrom=nq.getcol("from") vto=nq.getcol("to") vdelm=nq.getcol("delm") vdeld=nq.getcol("deld")}
+  sz=vfrom.size
+  for i=0,sz-1 {delm[vfrom.x(i)][vto.x(i)]=vdelm.x(i) deld[vfrom.x(i)][vto.x(i)]=vdeld.x(i)}
+  {nq.tog("DB") nq.verbose=1}
+}
+
+//** clrnqss - clear nqs objects used for storing cell/connectivity info
+proc clrnqss () {
+  {nqsdel(cellsnq) cellsnq=nil}
+  {nqsdel(connsnq) connsnq=nil}
+  {nqsdel(xcolconnsnq)  xcolconnsnq=nil}
+}
+
+//** new COLUMN(ID,vnumc,[nqwiring,wiringseed,xpos,ypos,setdviPT,mknetnqss,skipwire]])
+proc init () { local skipwire
+  if (numarg()==0) { 
+    print "WARN: skipping default COLUMN init"
+    return 
+  }
+  {id=$1 dgcor=0 setdviPT=DVFIXED wseed=1234 verbose=0}
+  {pseed=4321 cside=300 zvar=25} // swire-based params
+  if(numarg()>=9) skipwire=$9 else skipwire=0 // whether to skip wiring , so can save time & wire directly from NQS
+  if(numarg()>=8) mknetnqss=$8 else mknetnqss=0
+  double numc[CTYPi],ix[CTYPi],ixe[CTYPi],div[CTYPi][CTYPi]
+  double wmat[CTYPi][CTYPi][STYPi],wd0[CTYPi][CTYPi][STYPi],delm[CTYPi][CTYPi],deld[CTYPi][CTYPi]
+  double conv[CTYPi][CTYPi],pmat[CTYPi][CTYPi],synloc[CTYPi][CTYPi],syty1[CTYPi][CTYPi],syty2[CTYPi][CTYPi]
+  {clrsyty() mkcells($o2) sprint(name,"C%d",id) clrnqss()}
+  if(mknetnqss) mkcellsnq()  // make cellsnq and connsnq
+  if(numarg()>2) {
+    {setpmat($o3) setwmat($o3) setsynloc($o3) setdelmats($o3)}
+    if(numarg()>=6) {xpos=$5 ypos=$6 sprint(name,"C%d_X%d_Y%d",id,xpos,ypos)} // position in 2D grid
+    if(numarg()>=7) setdviPT=$7 // wiring scheme
+    if(numarg()>3) wseed=$4
+    if(!skipwire) wire(wseed)
+  }
+}
+
+//** initdivrnd(seed) - initializes random object for wiring
+obfunc initdivrnd () { local s localobj rd
+  s=$1
+  if(setdviPT==PARETO) rd=new rdmpareto(1,PARETOSH,s) else {rd=new Random() rd.ACG(s)}
+  return rd
+}
+
+//** wirenq(nqs) - wires the column using connections in NQS
+proc wirenq () {local ii,jj,a localobj nq,vidx,vdel,vdist,vwt1,vwt2,vpre
+  nq=$o1 nq.tog("DB") nq.verbose=0
+  if(verbose) printf("wiring COLUMN %d from %s...",id,nq)
+  a=allocvecs(vidx,vdel,vdist,vwt1,vwt2,vpre) z=0
+  vrsz(1e4,vidx,vdel,vdist)
+  // Create the connectivity NQS table.
+  if(mknetnqss) {nqsdel(connsnq) connsnq=new NQS("id1","id2","del","dist","wt1","wt2") connsnq.cp(nq)}
+  vpre.resize(nq.v.size)
+  nq.getcol("id1").uniq(vpre) // presynaptic IDs
+  for ii=0,vpre.size-1 { jj=vpre.x(ii)
+    if(nq.select("id1",jj)) {
+      vrsz(0,vidx,vdel,vdist,vwt1,vwt2)
+      vidx.copy(nq.getcol("id2"))
+      vdel.copy(nq.getcol("del"))
+      vdist.copy(nq.getcol("dist"))
+      vwt1.copy(nq.getcol("wt1"))
+      vwt2.copy(nq.getcol("wt2"))
+      if(wsetting_INTF6==1) ce.o(ii).setdvi(vidx,vdel,vdist,1,vwt1,vwt2) else ce.o(ii).setdvi(vidx,vdel,vdist,1)
+    }
+  }
+  if(ce.count>0) {
+    ce.o(0).finishdvir()
+  }
+  dealloc(a) nq.verbose=1
+  if(verbose) printf("done\n")
+}
+
+//** xydistm -- return x,y distance in milli-meters btwn ce.o($1) and ce.o($2)
+func xydistmm () { localobj c1,c2
+  c1=ce.o($1)
+  c2=ce.o($2)
+  return sqrt( (c1.xloc-c2.xloc)^2 + (c1.yloc-c2.yloc)^2 ) / 1e3
+}
+
+//* swire2col - spatial wiring btwn columns
+proc swire2col () {
+  print "WARNING: swire2col not implemented yet!"
+  return
+}
+
+//** swire([seed,maxfall]) - spatial wiring: wires the column using pmat and cell positions
+//                   (wiring probability effected by distance btwn cells)
+// seed is random # seed, maxfall is a number (0,1) that specifies maximum fall-off in
+// probability at opposite side of column where dx^2+dy^2==2*cside^2
+proc swire () { local x,y,z,ii,jj,a,del,prid,poid,prty,poty,dv,dvt,lseed,dvrand,szo,sc,h,prob,maxfall\
+               localobj v1,v2,v3,v4,v5,v6,v7,vidx,vdel,vdist,vwt1,vwt2,vtmp,opr,opo,st,l,rdm
+  if(verbose) printf("wiring COLUMN %d",id)
+  a=allocvecs(v1,v2,v3,v4,v5,v6,v7,vidx,vdel,vtmp,vdist,vwt1,vwt2) z=0 l=new List() l.append(v1) l.append(v4)
+  if (argtype(1)==0) lseed=$1 else lseed=1234
+  if(numarg()>1) maxfall=$2 else maxfall=0.1  
+  if(maxfall<0 || maxfall>=1) {
+    printf("swire WARN: invalid maxfall=%g, setting maxfall to 0.1\n",maxfall)
+    maxfall=0.1
+  }
+  vrsz(1e4,vidx,vdel,vdist,vtmp)
+  rdm=initdivrnd(lseed)//initialize random # generator
+  sd = 2*cside^2 / log(maxfall) // this is negative
+  // Create the connectivity NQS table.
+  if(mknetnqss) {nqsdel(connsnq) connsnq=new NQS("id1","id2","del","dist","wt1","wt2")}
+  for y=0,ce.count-1 { opr=ce.o(y)
+    vrsz(0,vidx,vdel,vdist,vwt1,vwt2)
+    if(verbose) if(y%100==0)printf(".")
+    prid=opr.id prty=opr.type
+    for poty=0,CTYPi-1 if (numc[poty]!=0 && (h=pmat[prty][poty])>0) {
+      for poid=ix[poty],ixe[poty] if(prid!=poid) { // go thru postsynaptic cells
+        opo = ce.o(poid)
+        dx = abs(opr.xloc - opo.xloc)
+        dy = abs(opr.yloc - opo.yloc)
+        prob = h * E^((dx^2+dy^2)/sd) // probability of connect
+        //print h,dx,dy,sd,prob
+        if( prob >= rdm.uniform(0,1) ) {
+          del = rdm.uniform(delm[prty][poty]-deld[prty][poty],delm[prty][poty]+deld[prty][poty])
+          //if(dlayer[idx]==dlayer[jdx]){ //add intra-layer conduction delay
+          //  if(ex1) del += xydistmm(idx,jdx) else del += xydistmm(idx,jdx) / 0.4
+          //}          
+          vidx.append(poid)
+          vdel.append(del)
+          if(synloc[prty][poty]==DEND) vdist.append(1) else vdist.append(0)
+
+          if(mknetnqss || wsetting_INTF6==1) {
+            if(syty1[prty][poty]>=0) vwt1.append(wmat[prty][poty][syty1[prty][poty]]) else vwt1.append(0)
+            if(syty2[prty][poty]>=0) vwt2.append(wmat[prty][poty][syty2[prty][poty]]) else vwt2.append(0)
+          }
+        }
+      }
+    }
+    if(vidx.size>0) {
+      if(wsetting_INTF6==1) opr.setdvi(vidx,vdel,vdist,1,vwt1,vwt2) else opr.setdvi(vidx,vdel,vdist,1)
+      if(mknetnqss) for ii=0,vidx.size-1 connsnq.append(prid,vidx.x(ii),vdel.x(ii),vdist.x(ii),vwt1.x(ii),vwt2.x(ii))
+    }
+  }
+  if(ce.count>0) {
+    ce.o(0).finishdvir()
+  }
+  dealloc(a)
+  if(verbose) printf("\n")
+}
+
+//** wire([seed]) - wires the column using div matrix
+proc wire () { local x,y,z,ii,jj,a,del,prid,prty,poty,dv,dvt,lseed,dvrand,szo\
+               localobj v1,v2,v3,v4,v5,v6,v7,vdvd,vidx,vdel,vdist,vwt1,vwt2,vtmp,opr,opo,st,l,rdm,rdmDV
+  if(verbose) printf("wiring COLUMN %d",id)
+  a=allocvecs(v1,v2,v3,v4,v5,v6,v7,vidx,vdel,vdvd,vtmp,vdist,vwt1,vwt2) z=0 l=new List() l.append(v1) l.append(v4)
+  if (argtype(1)==0) lseed=$1 else lseed=1234
+  vrsz(1e4,vidx,vdel,vdist,vtmp)
+  vrsz(ce.count*CTYPi,vdvd)
+  {rdm=new Random() rdm.MCellRan4(lseed,lseed)}
+  if(dgcor){dvrand=0.2 rdm.uniform(.8,1.2) vdvd.setrand(rdm)}// div variability of 20% when dgcor==1
+  rdmDV=initdivrnd(lseed)//initialize random # generator for use when dgcor==0
+  // Create the connectivity NQS table.
+  if(mknetnqss) {nqsdel(connsnq) connsnq=new NQS("id1","id2","del","dist","wt1","wt2")}
+  for y=0,ce.count-1 { opr=ce.o(y)
+    vrsz(0,vidx,vdel,vdist,vwt1,vwt2)
+    if(verbose) if(y%100==0)printf(".")
+    prid=opr.id prty=opr.type
+    for poty=0,CTYPi-1 if (numc[poty]!=0 && (dv=int(div[prty][poty]))>0) {      
+      if(!dgcor) dv=getNdv(rdmDV,dv) else dv*=(1+vdvd.x[y])
+      vrsz(MAXxy(2*dv,4*numc[poty]),v1,v2,v3)                
+      {rdm.discunif(ix[poty],ixe[poty]) v3.setrand(rdm)}
+      if(prty==poty) {v1.cull(v3,prid) v3.copy(v1) v2.resize(v3.size)} // get rid of self connect      
+      if( (cnt=v3.uniq(l,1)) > dv){ cnt = dv } // puts unsorted uniq vals into v4
+      vrsz(cnt,v2,v4,v5,v6,v7) // v4 has poids
+      rdm.uniform(delm[prty][poty]-deld[prty][poty],delm[prty][poty]+deld[prty][poty])
+      v2.setrand(rdm)
+      v2.abs() // no negative delays
+      if(synloc[prty][poty]==DEND) v5.fill(1) else v5.fill(0)
+      vidx.append(v4) vdel.append(v2) vdist.append(v5) // vidx.append(v1) will give sorted bug
+      if(mknetnqss || wsetting_INTF6==1) {
+        if(syty1[prty][poty]>=0) v6.fill(wmat[prty][poty][syty1[prty][poty]]) else v6.fill(0)
+        if(syty2[prty][poty]>=0) v7.fill(wmat[prty][poty][syty2[prty][poty]]) else v7.fill(0)
+        vwt1.append(v6) vwt2.append(v7)
+      }
+    }//end poty
+    if(vidx.size>0) {
+      if(wsetting_INTF6==1) opr.setdvi(vidx,vdel,vdist,1,vwt1,vwt2) else opr.setdvi(vidx,vdel,vdist,1)
+      if(mknetnqss) for ii=0,vidx.size-1 connsnq.append(prid,vidx.x(ii),vdel.x(ii),vdist.x(ii),vwt1.x(ii),vwt2.x(ii))
+    }
+  }//end cell loop
+  if(ce.count>0) {
+    ce.o(0).finishdvir()
+  }
+  dealloc(a)
+  if(verbose) printf("\n")
+}
+
+//** wire2col(targetcol,nq,distance,ncl) - connect this COLUMN to another COLUMN
+func wire2col () { local d,from,to,sz,dvm,dv,pij,dlym,dlyd,w1,w2,sy1,sy2,loc,i,idx,jdx,kdx,gid1,gid2,cnt,a\
+                  localobj tcol,nq,ncl,vfrom,vto,vdelm,vdeld,vw,vsy,vpij,vloc,rdm,vidx,vdel,v1,v2,v3,v4,l,nc,prx,pox,rdmDV
+  {tcol=$o1 nq=$o2 d=$3 ncl=$o4 nq.verbose=0}
+  if(verbose) print "wiring COLUMN ", id, " to COLUMN ",tcol.id
+  if(!nq.select("dist",d)) {nq.verbose=1 printf("wire2col WARNA: none found @ d=%d!\n",d) nq.tog("DB") return 0}
+  a=allocvecs(vidx,vdel,v1,v2,v3,v4) l=new List() l.append(v1) l.append(v4)
+  {vfrom=nq.getcol("from") vto=nq.getcol("to") vsy=nq.getcol("sy")}
+  {vdelm=nq.getcol("delm") vdeld=nq.getcol("deld") vw=nq.getcol("w")}
+  {vpij=nq.getcol("pij") vloc=nq.getcol("loc")}
+  if(verbose) print "tcol.wseed = ",tcol.wseed, " vfrom.size = ",vfrom.size
+  rdmDV=initdivrnd(tcol.wseed)//initialize random # generator
+  {rdm=new Random() rdm.MCellRan4(tcol.wseed,tcol.wseed)}
+  if (mknetnqss && xcolconnsnq==nil) xcolconnsnq=new NQS("id1","col2","id2","del","wt1","wt2")
+  i=0
+  while(i<vfrom.size) {
+    {from=vfrom.x(i) to=vto.x(i) dlym=vdelm.x(i) dlyd=vdeld.x(i)}
+    {w1=vw.x(i) sy1=vsy.x(i) sy2=w2=-1 pij=vpij.x(i) loc=vloc.x(i)}
+    dvm = ceilg(pij*tcol.numc[to]) // divergence
+    if((sy1==AM || sy1==AM2) && i+1<vfrom.size) { // check for NMDA, which follows AMPA
+      if(vfrom.x(i+1)==from && vto.x(i+1)==to && (vsy.x(i+1)==NM || vsy.x(i+1)==NM2)) {
+        sy2=vsy.x(i+1) w2=vw.x(i+1)
+      } 
+    }
+    for idx=ix[from],ixe[from] { // go thru presynaptic cells
+      dv=getNdv(rdmDV,dvm)
+      vrsz(4*dv,v1,v2,v3) 
+      {rdm.discunif(tcol.ix[to],tcol.ixe[to]) v3.setrand(rdm)}
+      if(verbose && v3.size<1) print "dv=",dv," from ",CTYP.o(from).s, " to ",CTYP.o(to).s," numc=",tcol.numc[to]," ix=",tcol.ix[to]
+      if((cnt=v3.uniq(l,1))>dv) cnt=dv 
+      {vrsz(cnt,v2,v4) rdm.uniform(dlym-dlyd,dlym+dlyd) v2.setrand(rdm)}
+      v2.abs() // no negative delays
+      if(verbose>1) {
+        print CTYP.o(from).s, " -> ", CTYP.o(to).s, ": pij ", pij, ", dvm ", dvm, ", dv ", dv, ", v4.size ", v4.size
+        printf("v4: ") vlk(v4)
+        printf("v2: ") vlk(v2)
+      }
+      ce.o(idx).flag("out",1) // make sure NetCon events enabled from this cell
+      for jdx=0,v4.size-1 {
+        prx = ce.o(idx)
+        pox = tcol.ce.o(v4.x(jdx))
+        ncl.append(nc=new NetCon(prx,pox))
+        nc.weight(sy1)=w1
+        if(sy2!=-1) nc.weight(sy2)=w2
+        nc.delay=v2.x(jdx)
+        if(mknetnqss) {
+          if(sy2!=-1) {
+            xcolconnsnq.append(prx.id,pox.col,pox.id,nc.delay,w1,w2)
+          } else {
+            xcolconnsnq.append(prx.id,pox.col,pox.id,nc.delay,w1,0)
+          }
+        }
+      }      
+    }
+    if(sy2!=-1) i+=2 else i+=1 // if used NMDA, skip it
+  }
+  {nq.verbose=1 nq.tog("DB") dealloc(a) return 1}
+}
+
+//** setarrs(vector of num per type) - sets  up arrays/numc/cell counts
+proc setarrs () { local ct,cnt,cl,ii localobj vnumc
+  {vnumc=$o1 cnt=allcells=icells=ecells=0}
+  for ct=0,CTYPi-1 if (vnumc.x(ct)>0) { numc[ct]=vnumc.x(ct)
+    ix[ct]=cnt ixe[ct]=cnt+numc[ct]-1 cnt+=numc[ct]
+    if(ice(ct))icells+=numc[ct] else ecells+=numc[ct]
+  } else numc[ct]=0
+  allcells=ecells+icells
+}
+
+//* setcellpos(vector of z values by type[,z variance,pseed,columndiameter in microns])
+proc setcellpos () { local i,z,x,y,zvar,c localobj rdm,vz
+  vz=$o1 
+  if(numarg()>1) zvar=$2 
+  if(numarg()>2) pseed=$3
+  if(numarg()>3) cside=$4
+  {rdm=new Random() rdm.ACG(pseed)}
+  c=-1
+  if(cellsnq!=nil) c=cellsnq.fi("xloc")
+  for i=0,allcells-1 {
+    ce.o(i).xloc=x=rdm.uniform(0,cside)
+    ce.o(i).yloc=y=rdm.uniform(0,cside)  
+    ce.o(i).zloc=z=rdm.normal(vz.x(ce.o(i).type),zvar)
+    if(c!=-1) {
+      cellsnq.v[c+0].x(i)=x
+      cellsnq.v[c+1].x(i)=y
+      cellsnq.v[c+2].x(i)=z
+    }
+  }
+}
+
+//** mkcells(vector of num per type) - make the cells
+proc mkcells () { local ct,idx,jdx,ty,nc,ic localobj vnumc,xo,st
+  st=new String()
+  if(ce==nil) ce=new List()
+  {vnumc=$o1 setarrs(vnumc)  }
+  idx=0 // starting ID for cells in column - assumes all columns same size
+  for ct=0,CTYPi-1 if(vnumc.x(ct)>0) { ic=ice(ct)
+    for jdx=ix[ct],ixe[ct] {
+      ce.append(xo=new INTF6(jdx,ct,ic,this.id))
+      idx+=1
+    }
+  }  
+  if(!ce.count) return  
+  intf=ce.o(0)
+  sprint(st.s,"%s.intf.jitcondiv(%s.ce,%d,&%s.ix,&%s.ixe,&%s.div,&%s.numc,&%s.wmat,&%s.wd0,&%s.delm,&%s.deld)",this,this,this.id,this,this,this,this,this,this,this,this)
+  if(verbose) print st.s
+  execute(st.s)
+  {sprint(st.s,"%s.intf.flag(\"jcn\",1,1)",this) execute(st.s)}
+  if(verbose) print " finished mkcells "
+}
+
+//** mkcellsnq() -- make NQS table for all of the cells in the column
+proc mkcellsnq () { local ii localobj xo 
+  nqsdel(cellsnq)
+  cellsnq=new NQS("gid","id","col","ty","ice","xloc","yloc","zloc")
+  for ii=0,ce.count - 1 {
+    xo = ce.o(ii)
+    cellsnq.append(xo.gid,xo.id,xo.col,xo.type,ice(xo.type),xo.xloc,xo.yloc,xo.zloc)
+  }
+}
+
+//*** ctt(&i) - iterate over cell types in increasing CTYPi order
+iterator ctt () { local i
+  for i=0,CTYPi-1 if(numc[i]>0) {
+    $&1=i
+    iterator_statement
+  }
+}
+//*** cttr(&i) - iterate over cell types in decreasing CTYPi order
+iterator cttr () { local i
+  for(i=CTYPi-1;i>=0;i-=1) if(numc[i]>0) {
+    $&1=i
+    iterator_statement
+  }
+}
+//*** stt(&i,&j,&k) - iterate over active synapses types in order
+iterator stt () { local i,j,k
+  for i=0,CTYPi-1 if(numc[i]>0) for j=0,CTYPi-1 if(numc[j]>0 && div[i][j]>0) {
+    for k=0,STYPi-1 if(wmat[i][j][k]>0) {
+      $&1=i $&2=j $&3=k
+      iterator_statement
+    }
+  }
+}
+
+proc version () { print "$Id: col.hoc,v 1.103 2012/04/21 04:04:23 samn Exp $" }
+
+endtemplate COLUMN

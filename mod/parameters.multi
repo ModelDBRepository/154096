@@ -1,0 +1,17 @@
+: $Id: parameters.multi,v 1.6 2010/09/20 15:30:40 samn Exp $ 
+
+DEFAULT vecst
+DEFAULT stats
+DEFAULT misc
+DEFAULT nstim
+DEFAULT intf6
+DEFAULT intfsw
+DEFAULT infot
+DEFAULT staley
+DEFAULT sampen
+DEFAULT place
+DEFAULT updown
+
+
+DEFAULT myfft :just for debugging fft
+DEFAULT tsa

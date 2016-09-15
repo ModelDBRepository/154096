@@ -1,0 +1,157 @@
+// FLEXINPUT
+// This is a collection of scripts for adding flexible input to
+// intfcol. It uses the lfpstim function that Bill
+// wrote, plus an adaptation of "sgrcells" from col.hoc.
+// Version: 2012nov21 by cliffk and markr
+
+
+// POISADD
+// This function adds an arbitrary Poisson input to a particular
+// population or populations of cells. It calls poistim followed
+// by stimadd.
+// Usage:
+//   poisadd(signal,timei,timef,freq,cellpop,cellprct,cellwt,whichsy[,seed][,stim_membrane])
+// where
+//   signal describes the probability of a spike at a given time (e.g. a 10K-element sine wave)
+//   timei is the start time of the stimulus (in ms, e.g. 2e3)
+//   timef is the end time of the stimulus (in ms, e.g. 5e3)
+//   freq is the number of spikes (in Hz, e.g. 10) (note: signal.size() must be greater than (timef-timei)*freq!)
+//   pop is a vector of cell populations (e.g. [E2,E4,E5])
+//   cellwt is the weight given to each spike, in a vector  (e.g. 1e9)
+//   whichsy is the synapse used (e.g. AM2)
+//   seed is (optionally) the random seed to use for generating the spikes
+//   stim_membrane bypasses the cell's attempts to scale AMPA synapses up/down, by multiplying
+//     the cellwt by 1/scalefactor. This allows modelling of direct stimulation of the cell
+//     membrane (e.g. by a prosthesis), rather than the stimulation being scaled up/down
+// Version: 2012nov21
+
+proc poisadd () { local timei,timef,freq,cellprct,whichsy,npops,cellstart,cellfinish,pickthiscell localobj pickcell,signal,cellpop,spkoutput,cellwt
+  signal=$o1 // Signal to base the Poisson spike train on
+  timei=$2 // Start time of signal
+  timef=$3 // End time of signal
+  freq=$4 // Frequency/rate of the signal
+  cellpop=$o5 // Cell populations to add signal to
+  cellprct=$6 // Percent of cells to stimulate in each population
+  cellwt=$o7 // Weight of each synapse, one value per population in cellpop
+  whichsy=$8 // Type of each synapse
+  fixedseed=0 // 0 by default
+  stim_membrane=0 // Off by default
+  if(numarg()>8) {
+    fixedseed=$9 // Random seed to use for generating spikes
+  }
+  if(numarg()>9) {
+    stim_membrane=$10 // Whether to ignore scaling for direct stimulation of cell membrane
+  }
+
+  pickcell=new Random(fixedseed) // Random number generator
+  pickcell.uniform(0,1) // Require uniform-distributed random numbers from 0->1
+  npops=cellpop.size() // Number of cell populations
+
+  count=0
+  for h=0,numcols-1 { // Loop over columns
+    for i=0,npops-1 { // Loop over each cell population
+	   	cellstart=col[h].ix[cellpop.x[i]] // Starting cell index
+	  	cellfinish=col[h].ixe[cellpop.x[i]] // Finishing cell index
+	  	for cellid=cellstart,cellfinish { // Loop over each cell in the population
+	  		pickthiscell=100*pickcell.repick() // Whether or not to pick this cell
+	  		if(cellprct>pickthiscell) { // Pick out cellprct percent of cells
+	  			//thisseed=7829*cellid+24091*i+251 // Create a pseudorandom seed
+                //printf("cellprct %d, pickthiscell %f, cell %d\n", cellprct, pickthiscell, cellid)
+                if(fixedseed>0) {
+                    thisseed = cellid+fixedseed // Each cell has its own fixed seed
+                    // So the seed for each cell remains the same on every call, but each cell does not
+                    // get exactly the same spike train (which would lead to over-synchronized firing).
+                    //printf("Using fixed seed %df\n", thisseed)
+                } else {
+                    thisseed = cellid+t // Pseudorandom seed (new for each cell every time t increments)
+                    //printf("Using variable seed %d\n", thisseed)
+                }
+	  			spkoutput=poistim(signal,timei,timef,freq,thisseed) // Calculate Poisson train
+
+                if(stim_membrane) {
+                    scalefactor=col[h].ce.o(cellid).get_scale_factor() // Obtain scalefactor.
+                    // For info trials, scalefactor == 1 for every cell anyway, so this doesn't matter.
+                    // But for AD + prosthesis trials, prosthesis shouldn't be scaled as it's supposed to
+                    // act on cell membranes (which are not scaled), rather than the AM2 synapses (which
+                    // are scaled) that we're forced to use due to the model limitations.
+                    // So we should multiply the prosthesis weight by 1/scalefactor
+                    stimwt = cellwt.x[i] * 1/scalefactor
+                } else {
+                    stimwt = cellwt.x[i]
+                }
+                //printf("cellID = %d, stimwt = %f\n", cellid, stimwt)
+        		stimadd(spkoutput,cellid,stimwt,whichsy)
+	  		}
+	  	}
+  	}
+/*  col[h].cstim.pushspks() // Test -- stim wasn't having any effect before*/
+  }
+}
+
+
+// POISTIM -- arbitrary Poisson generator
+//** spktimevec = poistim(signal,timei,timef,freq)
+// signal is vector giving the input signal - eg LFP
+// timei gives the initial time time of the signal
+// timef gives the final time of the signal, thus timespan is timef-timei
+// freq gives the target freq for the spike train -- this is approximate
+// Example: 
+// objref signal, spktimevec
+// signal=new Vector()
+// signal.indgen(0.1,0.9,0.001)
+// spktimevec=poistim(signal,10,5)
+// spktimevec.size() = 50
+// Note: the number of points in "signal" must be equal to or greater than the number of spikes!
+// Version: 2011may20
+obfunc poistim () { local a,timei,timef,thisseed localobj signal,v1,v2,vt
+  signal=$o1 timei=$2 timef=$3 freq=$4 thisseed=$5 // Handle input arguments: signal
+  a=allocvecs(v1,v2) // Allocate vectors
+  vt=new Vector(signal.size) // but ((timef-timei)*freq) is number of spikes desired in period
+  vt.setrnd(4,thisseed) // seed for 0-1
+  v1.copy(signal) v1.inv()
+  vt.mul(v1) // scale the intervals by the signal
+  vt.mul((timef-timei)/vt.sum)
+  vt.integral() // turn intervals into times
+  v1.resize((timef-timei)*freq/1e3) // deletes trailing elements
+  v1.setrnd(6,0,vt.size-1,thisseed) // rand unique indices; to cull to get only (maxt*freq/1e3)
+  v2.index(vt,v1) // pick the times randomly
+  vt.copy(v2)
+  vt.add(timei) // Add start time
+  dealloc(a)
+  return vt
+}
+
+
+
+// STIMADD -- add stimulus to the input list for a single cell
+// This function, based on sgrcells, adds an arbitrary
+// stimulus to the rest of the input NQS table vq.
+// Usage:
+//	 stimadd(times,cellid,cellwt,whichsy)
+// where
+//	 times is a length-N vector of spike times (e.g. 0, 1.34, 2.53, 7.34, 7.45)
+//	 cellid is the cell ID (e.g. 142)
+//   cellwt is the synaptic weight (e.g. 1e9)
+//   whichsy is the synapse type (e.g. AMPA)
+// Version: 2011may20
+proc stimadd () { local cellid,cellwt,whichsy,npts,ii,foo,i localobj times,vqtmp
+   for i=0,numcols-1 {
+     if (col[i].cstim.vq==nil) col[i].cstim.vq=new NQS("ind","time","cellwt","whichsy") // Initialize NQS to store spikes
+   }
+   vqtmp=new NQS("ind","time","cellwt","whichsy")
+   times=$o1 // Incoming spike times (e.g. 0, 1.34, 2.53, 7.34, 7.45)
+   cellid=$2 // Cell ID (e.g. 142)
+   cellwt=$3 // Synaptic weights (e.g. 1e9)
+   whichsy=$4 // Synapse type (e.g. AMPA)
+   npts=times.size() // Find the number of points
+   for ii=0,3 vqtmp.v[ii]=new Vector(npts) // Initialize vectors
+   vqtmp.v[0].fill(cellid) // Assign the cell ID
+   vqtmp.v[1]=times // Assign the times to the second column
+   vqtmp.v[2].fill(cellwt) // Assign weights
+   vqtmp.v[3].fill(whichsy) // Assign synapse type
+   vqtmp.pad() // Shouldn't be necessary, but it is -- make sure all columns are the same size
+   for i=0,numcols-1 {
+     col[i].cstim.vq.append(vqtmp) // Append to original array -- won't take effect until pushspks() call, however
+   }
+   nqsdel(vqtmp) // Garbage collection
+ }

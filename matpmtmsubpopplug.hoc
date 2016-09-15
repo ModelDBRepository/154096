@@ -1,0 +1,69 @@
+// $Id: matpmtmsubpopplug.hoc,v 1.3 2010/10/10 02:34:03 samn Exp $ 
+
+
+// "plugin" (for batch.hoc) to do analysis on sim data
+
+// want power of: subpop E, total E , total E - subpop . . . bring I along for the ride
+
+binsz = 5 // bin size in ms
+sampr = 1e3 / binsz // sampling rate
+initAllMyNQs() // initialize counts per time, by type, column, etc.
+
+objref nqf,nqtmp
+objref vintraty[numcols][CTYPi] // HUB(SIMTYP) subpop within column
+objref vintraE[numcols]         // total of all Es within column
+objref vintraI[numcols]         // all Is within column
+objref vintraEMINUS[numcols]    // total minus subpop, within column
+objref vintraIMINUS[numcols]    // total minus subpop, within column
+
+sz=nqCTY[0].v[E2].size
+
+proc myrsz () { // util func to call matpmtm and add results to nqf
+  {vec.resize(0) vec.copy($o1) vec.sub(vec.mean)}
+  nqtmp=matpmtm(vec,sampr)
+  if(nqf.fi("f")==-1) {nqf.resize("f") nqf.v[nqf.m-1].copy(nqtmp.getcol("f"))}
+  {nqf.resize($s2) nqf.v[nqf.m-1].copy(nqtmp.getcol("pow"))}
+  nqsdel(nqtmp)
+}
+
+nqf=new NQS()
+
+for i = 0 , numcols - 1 { // setup all the vectors that will have matpmtm run on them
+  {vintraE[i]=new Vector(sz)  vintraI[i]=new Vector(sz)}
+  {vintraIMINUS[i]=new Vector(sz) vintraEMINUS[i]=new Vector(sz)}
+  for j = 0, CTYPi - 1 {
+    if(nqCTY[i].v[j].size>0) {
+      
+      if(j==SIMTYP) {
+        vintraty[i][j]=new Vector(sz)
+        vintraty[i][j].copy(nqCTY[i].v[j]) // subpop
+      }
+      
+      if(ice(j)) {
+        vintraI[i].add(nqCTY[i].v[j])
+        if(j!=SIMTYP) vintraIMINUS[i].add(nqCTY[i].v[j]) // total I minus I hub subpop
+      } else {
+        vintraE[i].add(nqCTY[i].v[j]) // total
+        if(j!=SIMTYP) vintraEMINUS[i].add(nqCTY[i].v[j]) // total E minus E hub subpop
+      }
+    }
+  }
+}
+
+for i=0,numcols-1 {
+  {sprint(tstr,"C%dintraE",i) myrsz(vintraE[i],tstr)}
+  if(ice(SIMTYP)) {
+    {sprint(tstr,"C%dintraIMINUS",i) myrsz(vintraIMINUS[i],tstr)}
+  } else {
+    {sprint(tstr,"C%dintraEMINUS",i) myrsz(vintraEMINUS[i],tstr)}
+  }
+  {sprint(tstr,"C%dintraI",i) myrsz(vintraI[i],tstr)}
+  for j=0,CTYPi-1 if(vintraty[i][j]!=nil) {
+    if(vintraty[i][j].size>0) {sprint(tstr,"C%dintra%s",i,CTYP.o(j).s) myrsz(vintraty[i][j],tstr)}
+  }
+}
+
+sprint(tstr,"/u/samn/intfcol/data/%s_nqpmtm_SUBPOPpow_A.nqs",strv)
+nqf.sv(tstr)
+nqsdel(nqf)
+

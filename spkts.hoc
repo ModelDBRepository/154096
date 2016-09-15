@@ -1,0 +1,694 @@
+// $Id: spkts.hoc,v 1.86 2010/07/10 02:32:11 samn Exp $
+
+print "Loading spkts.hoc..."
+
+// ancillary programs for handling vectors
+
+{load_file("decvec.hoc")}
+{load_file("decnqs.hoc")}
+
+
+//* transfer a file into a list of strings
+// usage 'f2slist(list,file)'
+proc f2slist() { local i
+  $o1.remove_all
+  if (! tmpfile.ropen($s2)) { print "Can't open ",$s2
+    return }
+  while (tmpfile.gets(temp_string_)>0) {
+    sfunc.head(temp_string_,"\n",temp_string_) // chop
+    tmpobj = new String(temp_string_)
+    $o1.append(tmpobj)
+  }
+}
+
+//* spkts(attrnum[,flag,min,max]) graph spikes from the vectors
+
+thresh = -20    // threshold for deciding which are spikes
+burstlen = 1.4  // duration of spike or burst, don't accept another till after this time
+
+proc spkts_call() {}// callback function stub
+proc spkts () { local cnt, attrnum, ii, pstep, jj, num, time0, flag, min, max, tst
+  revec(vec,vec1) // store times and indices respectively
+  if (numarg()==0) { print "spkts(attrnum[,flag,min,max])\n\tflag 0: graph, flag 1: save vec1,vec to veclist, flag 2: save inds (vec1) and times (vec)" // infomercial
+    return }
+  attrnum=$1
+  panobj = GRV[attrnum]
+  if (attrnum==0) { cnt=printlist.count() } else { cnt = panobj.llist.count() }
+  pstep = panobj.printStep
+  if (numarg()>1) { flag = $2 } else { flag = 0 }
+  if (numarg()>2) { min = $3 } else { min = 0 }
+  if (numarg()>3) { max = $4 } else { max = cnt-1 }
+  if (flag==0){
+    newPlot(0,1,0,1)
+    panobj.glist.append(graphItem)
+  }
+  for ii=min,max {
+    if (attrnum==0) { 
+      vrtmp.copy(printlist.object(ii).vec) 
+      if (panobj.printStep==-2) tvec = printlist.object(ii).tvec
+      if (panobj.printStep==-1) tvec = panobj.tvec
+    } else {
+      panobj.rv_readvec(ii,vrtmp)  // pick up vector from file
+      if (panobj.printStep<0) tvec = panobj.tvec
+    }
+    if (panobj.printStep>=0) { // make a tvec
+      if (!isobj(tvec,"Vector")) { print "ERR0 spkts(): tvec not a vector" return }
+      tvec.resize(vrtmp.size)
+      tvec.indgen(pstep)
+    }
+    spkts1(tvec,vrtmp,vec,vec1,ii)
+
+    if (panobj.printStep<0) { // a tvec
+      tst = vec.max
+    } else {
+      tst = pstep*vrtmp.size()         // calc the tst
+    }
+  }
+  if (flag==1) { savevec(vec1) savevec(vec) }
+  if (flag<=0) {
+    vec1.mark(graphItem,vec,"O",panobj.line)  // graph all the times
+    printf("\n")
+    graphItem.size(0,tst,min,max)
+    graphItem.xaxis(0)
+    graphItem.label(0.1,0.9,panobj.filename)
+  }
+}
+
+// spkts1(tvec,vec,timev,indexv,index)
+proc spkts1 () { local ind,tm,ix
+  ind=tm=allocvecs(2) tm+=1
+  spkts_call()  // place to reset thresh or do other manipulations
+  mso[tm].resize($o2.size)
+  mso[tm].xing($o2,$o1,thresh) // times
+  if (numarg()==5) {
+    mso[ind].resize(mso[tm].size)  // scratch vector stores index
+    mso[ind].fill($5)
+    $o3.append(mso[tm])     // add the times for this to end of vec
+    $o4.append(mso[ind])  // add same index for each spk to end of vec1
+  } else {
+    vlk(mso[tm])
+  }
+  dealloc(ind)
+}
+
+//* parse_spkts()
+// pull the vec and vec1 files from spkts apart and put in alloc'ed vectors
+func parse_spkts () { local p,q
+  p=allocvecs(vec1.max+2) q=p+1
+  for (ii=0;ii<=vec1.max;ii+=1) {
+    mso[p].indvwhere(vec1,"==",ii)
+    mso[q].index(vec,mso[p]) 
+    q += 1
+  }
+  return p+1
+}
+
+proc line_spkts () { local ii,min,max,xmax,skip
+  skip = $1
+  if (numarg()==3) { min=$2 max=$3 } else {
+    min = int(graphItem.size(3)+1) max = int(graphItem.size(4)) }
+  xmax = graphItem.size(2)
+  for (ii=min;ii<max;ii=ii+skip) {
+    graphItem.beginline()
+    graphItem.line(0,ii)
+    graphItem.line(xmax,ii)
+  }
+  graphItem.xaxis()
+}
+
+burst_time=0
+burst_maxfreq = 30
+calc_ave = 0
+
+//** calcspkts(flag,index)
+// run after spkts() so vec contains the times, vec1 contains the
+// indices
+proc calcspkts () { local ii,jj,flag,index,p1,p2,mn,mx
+  p1 = allocvecs(2,1000) p2 = p1+1
+  if (numarg()==0) {
+    print "To be run after spkts(). \
+Assumes times in vec, indices in vec1. \
+calcspkts(flag,min,max)\nflags:\t1\tspk times\n\t2\tspk freq \
+\t3\tburst times\n\t4\tburst freq\nset calc_ave to get averages for freqs"
+    return
+  }
+  // vec contains the times, vec1 contains the indices
+  flag = $1
+  mn = $2
+  if (numarg()==3) { mx=$3 } else { mx=mn }
+  for index=mn,mx {
+    mso[p2].resize(0)
+    mso[p1].indvwhere(vec1,"==",index)
+    mso[p1].index(vec,mso[p1])
+    if (flag==1) {  
+      printf("SPKS for #%d: ",index)
+      for jj=0,mso[p1].size()-1 {printf("%g ",mso[p1].x[jj])}
+      printf("\n")
+    } else if (flag==2) {  
+      printf("FREQ for #%d: ",index)
+      for jj=0,mso[p1].size()-2 { 
+        pushvec(mso[p2],1000./(mso[p1].x[jj+1]-mso[p1].x[jj])) }
+      if (calc_ave) { print mso[p2].mean } else { vlk(mso[p2]) }
+    } else if (flag==3) {  
+      printf("BTIMES for #%d: ",index)
+      burst_time = mso[p1].x[0]
+      for jj=1,mso[p1].size()-1 {
+        if (1000./(mso[p1].x[jj]-burst_time) < burst_maxfreq) {
+          printf("%g ",burst_time)
+          burst_time = mso[p1].x[jj]
+        } 
+      }
+      printf("\n")
+    } else if (flag==4) {  
+      printf("BFREQ for #%d: ",index)
+      burst_time = mso[p1].x[0]
+      for jj=1,mso[p1].size()-1 {
+        // should keep track of spike times in case of very long bursts
+        if (1000./(mso[p1].x[jj]-burst_time) < burst_maxfreq) {
+          pushvec(mso[p2],1000./(mso[p1].x[jj]-burst_time))
+          burst_time = mso[p1].x[jj]
+        } 
+      }
+      if (calc_ave) { print mso[p2].mean } else { mso[p2].printf }
+    }
+  }
+  dealloc(p1)
+}
+
+func rvwheres () { local ii
+  if ($1!=0) {
+    for ii=0,panobjl.object($1).llist.count()-1 {
+      if (sfunc.substr(panobjl.object($1).llist.object(ii).name,$s2)==0) {
+        return ii }
+    }
+    errorMsg("String not found in rvwheres.")
+  }
+  return -2
+}
+
+supind = 0
+//* spkhist assume spk times in vec 
+// allows superimposing of graphs
+// spkhist(bin_size)
+proc spkhist () { local ii,jj,min,max,diff
+  if (numarg()==0) { print "spkhist(bin_size)" return }
+  if (numarg()==3) { min=$2 max=$3 } else { min=0 max=tstop }
+  diff = max-min
+  vrtmp.hist(vec,min,max,$1)
+  vec0.resize(4*diff/$1)
+  vec1.resize(4*diff/$1)
+  vec0.fill(0) vec1.fill(0)
+  for (ii=min;ii<int(diff/$1);ii=ii+1) {
+    jj=ii*4
+    vec0.x[jj+0] = ii*$1
+    vec0.x[jj+1] = ii*$1
+    vec0.x[jj+2] = (ii+1)*$1
+    vec0.x[jj+3] = (ii+1)*$1
+    vec1.x[jj+0] = 0
+    vec1.x[jj+1] = vrtmp.x[ii]
+    vec1.x[jj+2] = vrtmp.x[ii]
+    vec1.x[jj+3] = 0
+  }
+  if (panobj.super==0) {
+    newPlot(min,max,0,vrtmp.max)
+    panobj.glist.append(graphItem)  
+  } else { graphItem = panobjl.object(panobj.remote).glist.object(supind) 
+    supind = supind+1 }
+  vec1.line(graphItem,vec0)
+  sprint(temp_string_,"Hist: %s %d",panobj.filename,$1)
+  graphItem.label(0.1,0.9,temp_string_)
+}
+
+//** truncvec (vec1,margin) 
+// truncate a thresholded time vector so that only one time is given for each spike
+// vec1 has thresholded times, margin is duration of a spike
+proc truncvec () { local a,ii,num,marg,time0 localobj vs
+  marg = $2
+  a=allocvecs(vs)
+  num=0 time0=-1e3
+  vs.resize($o1.size())
+  vs.fill(-2)
+  for ii=0,$o1.size()-1 {
+    if ($o1.x[ii] > time0+marg) { 
+      vs.x[ii] = $o1.x[ii]
+      time0 = $o1.x[ii]
+    }
+  }
+  $o1.where(vs,">",-1)
+  dealloc(a)
+}
+
+//** redundkeep(vec) keeps sequential redundent entries
+// destructive
+proc redundkeep () { local x,ii
+  $o1.sort
+  x = $o1.x[0]
+  for ii=1,$o1.size-1 {
+    if ($o1.x[ii]!=x) { $o1.x[ii-1]=-1e20 x=$o1.x[ii] }
+  }
+  $o1.where($o1,">",-1e20)
+}
+
+//** after running spkall can see which cells are responsible for spks
+// assumes spk times in vec, spk identities in vec1
+// uses ind and vec0
+proc whichspked () { local ii
+  ind.indvwhere(vec,"()",$1,$2) // a range
+  vec0 = vec1.ind(ind)
+  ind = vec.ind(ind)
+  for ii=0,ind.size()-1 { printf("%d %g\n",vec0.x[ii],ind.x[ii]) }
+}
+
+// firebtwn(ind,time,min,max) list of cells that fire between times min and max
+proc firebtwn () { local ii,p1,p2,p3
+  p1 = allocvecs(3) p2=p1+1 p3=p2+1
+  mso[p3].indvwhere($o2,"[]",$3,$4)
+  mso[p1].index($o1,mso[p3]) // indices
+  mso[p2].index($o2,mso[p3]) // times
+  printf("%d hits\n",mso[p3].size)
+  for vtr2(&x,&y,mso[p1],mso[p2]) {
+      printf("%4d::%6.2f ",x,y)
+      if ((ii+1)%5==0) { print "" }
+  }
+  print ""
+  dealloc(p1)
+//  dealloc(p2) // to save the indexes
+}
+
+// elimind(ind,time,min,max) take out cells with nums between min,max
+// destructive
+proc elimind () { local ii,p1
+  p1 = allocvecs(1)
+  mso[p1].indvwhere($o1,"[]",$3,$4)
+  vecelim($o1,mso[p1]) vecelim($o2,mso[p1])
+  dealloc(p1)
+}
+
+// index/time graph
+// tigr(ind,vec,size,marker)
+proc tigr () { local sz
+  if (numarg()==0) { print "tigr(Yvec,Xvec,marker size,marker type)" 
+    print "Marker types: \"o\",t,s,O,T,S,+ (circ, tri, square; CAP is filled)"
+    return }
+  if (numarg()>2) { sz=$3 } else { sz=6 }
+  if (numarg()>3) { temp_string_=$s4 } else { temp_string_="O" }
+  nvplt($o2)
+  graphItem.size($o2.min,$o2.max,$o1.min,$o1.max)
+  $o1.mark(graphItem,$o2,temp_string_,sz,panobj.curcol) 
+}
+
+//* p2nqs(#,panobj,nqs) -- copy an entry into an nqs
+proc p2nqs () { local x,a localobj v1,q,p
+  x=$1 p=$o2 q=$o3
+  q.resize(0)
+  a=allocvecs(v1)
+  p.rv_readvec(x,v1)
+  q.resize("time",p.tvec,"ind",v1)
+  dealloc(a)
+}
+
+//** spkboth() determines how many cells spike in 2 time periods
+proc spkboth () { local a,t1,t2,t3,t4,s1,s2,s3 localobj v1,v2,v3,o
+  o=$o1 t1=$2 t2=$3 t3=$4 t4=$5
+  printf("MAY NEED DEBUGGING SINCE NQS.getcol() CHANGED\n")
+  a=allocvecs(v1,v2,v3,1e4)
+  o.verbose=0
+  o.select("time","()",t1,t2) v1.redundout(o.getcol("ind"))
+  o.select("time","()",t3,t4) v2.redundout(o.getcol("ind"))
+  v3.insct(v1,v2)
+  s1=v1.size s2=v2.size s3=v3.size
+  printf("P1: %d, P2: %d, Both: %d (%d%%, %d%%)\n",s1,s2,s3,s3/s1*100,s3/s2*100)
+  o.verbose=1
+  dealloc(a)
+}
+
+//returns NQS containing ID,Type,SpikeT
+//doesn't check if cell is dead or alive, assumes input is valid
+//$o1 = spike vitem
+//or
+//$o1 = spike vitem, $2 == skipI
+//or
+//$o1 = time vec , $o2 = id vec
+obfunc SpikeNQS(){ local idx,skipI localobj vec,tvec,nq
+  if(ce==nil) return nil
+  skipI=0
+  if(numarg()==1){
+    vec = $o1.vec tvec = $o1.tvec
+  } else if(numarg()==2){
+    if(argtype(1)==1 && argtype(2)==1){
+      tvec=$o1 vec=$o2
+    } else {
+      vec = $o1.vec tvec=$o1.tvec skipI=$2
+    }
+  } else {
+    printf("SpikeNQS ERRA: invalid args!\n")
+    return nil
+  }
+  nq = new NQS("ID","Type","SpikeT")
+  if(skipI){
+    for idx=0,2 { nq.v[idx].resize(vec.size) nq.v[idx].resize(0) }
+    for idx=0,vec.size-1 {
+      if(ice(ce.o(vec.x(idx)).type)) continue
+      nq.append(vec.x(idx),ce.o(vec.x(idx)).type,tvec.x(idx))
+    }
+  } else {
+    nq.v[0].copy(vec)
+    nq.v[2].copy(tvec)
+    nq.v[1].resize(vec.size)
+    for idx=0,vec.size-1 nq.v[1].x(idx)=ce.o(vec.x(idx)).type
+  }
+  return nq
+}
+
+//returns NQS with refractory % of cell types vs time -- assumes all cells of a type
+//have the same refractory period
+//$o1 = nqs from SpikeNQS, $2 = dt, optional, $3=skip inhib cells, optional
+obfunc refracNQ () { local ct,tt,dt,s,skipI,dotypes localobj snq,nr,vid
+  snq=$o1  nr=new NQS("Type","t","r")  ct=0
+  if(numarg()>1)dt=$2 else dt=0.25
+  if(numarg()>2)skipI=$3 else skipI=1
+  if(numarg()>3)dotypes=$4 else dotypes=0
+  for(tt=0;tt<=tmax_INTF;tt+=dt){
+    for ctt(&ct) if(skipI && !ice(ct)) {
+      if(snq.select("Type",ct,"SpikeT","[]",tt-ce.o(ix[ct]).refrac,tt)){
+        vid=snq.getcol("ID")//after select, so will use output
+        s=vid.uniq
+      } else {
+        s=0
+      }
+      nr.append(ct,tt,s/numc[ct])
+    }
+  }
+  return nr
+}
+
+//returns nqs with % of cells of each type that have activated by time=t
+obfunc PActNQS () { local tinc,winsz,idx,ct,tt,tm,spks,cells,spksE,spksI,nE,nI,cellsE,cellsI\
+                   localobj nqt,va,vspk,snq
+  snq=$o1
+  //time start,end,cell type,activated:0-1,spikes,cells:abs,cells:0-1
+  nqt=new NQS("ts","te","ct","act","spks","cells","cellsn")
+  if(numarg()>1)tinc=$2 else tinc=0.25
+  if(numarg()>2)winsz=$3 else winsz=0.5
+  va=new Vector(CTYPi+1)//keep track of % of cells of a type that have spiked
+  va.fill(0)
+  {vspk=new Vector(allcells) vspk.fill(0)}//keep track of which cells have spiked
+  snq.verbose=0
+  snq.tog("DB") tm=snq.getcol("SpikeT").max
+  for(tt=0;tt<tm;tt+=tinc) {
+    spksE=spksI=nE=nI=cellsE=cellsI=0
+    for ctt(&ct) {
+      if((spks=snq.select("Type",ct,"SpikeT","[]",tt,tt+winsz))) {
+        for vtr(&idx,snq.getcol("ID"))vspk.x(idx)=1 
+        if(ice(ct)) spksI+=spks else spksE+=spks
+      }
+      va.x(ct) = vspk.sum(ix[ct],ixe[ct]) / numc[ct]
+      if(spks>0) cells=snq.out.getcol("ID").uniq else cells=0
+      if(ice(ct)) {
+        nI+=va.x(ct)*numc[ct]
+        cellsI+=cells
+      } else {
+        nE+=va.x(ct)*numc[ct]
+        cellsE+=cells
+      }
+      nqt.append(tt,tt+winsz,ct,va.x(ct),spks,cells,cells/numc[ct])
+    }
+    nqt.append(tt,tt+winsz,-1,nE/ecells,spksE,cellsE,cellsE/ecells)
+    nqt.append(tt,tt+winsz,-2,nI/icells,spksI,cellsI,cellsI/icells)
+  }
+  snq.verbose=1
+  return nqt
+}
+
+//$o1=nqs from PActNQS , gets peaks & intervals of cell activity levels,
+//ct == -1 for E cells, ct == -2 for I cells
+obfunc GetPeakNQ () { local idx,ct localobj vi,nqp,vc,nqpo,nqin
+  nqin=$o1 nqin.tog("DB") vc=new Vector(nqin.size(-1)) nqin.getcol("ct").uniq(vc)
+  nqin.verbose=0
+  nqpo=new NQS("ct","ts","x","y","dx","dy")
+  for vtr(&ct,vc) {
+    nqin.select("ct",ct) vi=nqin.getcol("spks")
+    nqp=new NQS("ct","ts","x","y") 
+    for idx=1,vi.size-2 {
+      if(vi.x(idx)>vi.x(idx-1) && vi.x(idx)>vi.x(idx+1)) {
+        nqp.append(ct,nqin.getcol("ts").x(idx),idx,vi.x(idx))
+      }
+    }
+    nqp.resize("dx") nqp.resize("dy")
+    nqp.v[nqp.m-2]=Deriv(nqp.getcol("x"))
+    nqp.v[nqp.m-1]=Deriv(nqp.getcol("y"))
+    nqpo.append(nqp)
+    nqsdel(nqp)
+  }
+  nqin.verbose=1
+  return nqpo
+}
+
+
+// returns list containing spike times for each cell
+// $o1 == raster vitem
+obfunc spikelist () { local idx localobj ls,vec,tvec
+  vec=$o1.vec tvec=$o1.tvec
+  ls=new List()
+  for idx=0,allcells-1 ls.append(new Vector())
+  for idx=0,vec.size-1 ls.o(vec.x(idx)).append(tvec.x(idx))
+  return ls
+}
+
+// plot a single cell's spike times
+// $o1 == snq, $2 == cell id, $3 == color, $4 == size, $5==drawR
+proc plotcellst () { local cid,st,clr,a,sz,drawR localobj snq,vt,vx,vy
+  snq=$o1 cid=$2 clr=$3 sz=$4
+  if(numarg()>4)drawR=$5 else drawR=0
+  a=allocvecs(vx,vy)
+  snq.select("ID",cid)
+  gvmarkflag=1
+  vt=snq.out.v[2]//SpikeT
+  for vtr(&st,vt) vx.append(st) vy.append(cid)
+  if(drawR) for vtr(&st,vt) drline(st+.05,cid,st+ce.o(cid).refrac,cid,g,1,1)
+  vy.mark(g,vx,"O",sz,clr,1)
+  dealloc(a)
+}
+
+//draw fancier raster
+//$o1=nqs from SpikeNQS, $2==draw refractory periods, $3==skip inhib cells
+proc drawrastw () { local idx,skipI,drawR,maxID,a,c,sz,drlt localobj snq,vx,vy,vtype,vc,vtu
+  a=allocvecs(vx,vy) drlt=drlflush drlflush=0
+  vc=new Vector(CTYP.count+1) vc.fill(0)
+  snq=$o1 snq.tog("DB") maxID=snq.v[0].max//max ID
+  vtype=new Vector() vtype.copy(snq.v[1])//Type
+  if(numarg()>1)drawR=$2 else drawR=0
+  if(numarg()>2)skipI=$3 else skipI=0
+  if(numarg()>3)sz=$4 else sz=2
+  vtu=new Vector(vtype.size) vtype.uniq(vtu)
+  c=2
+  for vtr(&idx,vtu) if(!skipI || !ice(idx)) {
+    vc.x(idx)=c
+    c+=1
+  }
+  if(skipI){
+    for idx=0,maxID if(!ice(ce.o(idx).type)) {
+      plotcellst(snq,idx,vc.x(ce.o(idx).type),sz,drawR)
+    }
+  } else {
+    for idx=0,maxID {
+      plotcellst(snq,idx,vc.x(ce.o(idx).type),sz,drawR)
+    }
+  }
+  dealloc(a) drlflush=drlt  
+  if(name_declared("rasterlines"))rasterlines()
+  g.flush
+}
+
+
+
+// plot inhib cells in rast
+// $o1 == snq, $2==color, $3==size
+proc plotIrast () { local idx,clr,sz localobj xo,snq
+  snq=$o1 clr=$2 sz=$3 idx=0
+  for ltr(xo,ce,&idx) if(ice(xo.type)) plotcellst(snq,idx,clr,sz)
+}
+
+//simple coefficient of variation of interspike interval synch measure from tiesinga03.pdf
+//$o1 = spike nqs from SpikeNQS()
+//$2 = interval time
+//$3 = slide time
+//$4 = skip inhib cells [optional] default == 1
+obfunc CVPNQS(){ local idx,startt,endt,midt,N,intt,slidet,ct,skipI,CVp localobj snq,cvpnq,vs,vi,vu
+  snq=$o1 intt=$2 slidet=$3 if(numarg()>3)skipI=$4 else skipI=1
+  vs=new Vector(allcells*2) vi=new Vector(allcells*2)
+  vs.resize(0) vi.resize(0) snq.verbose=0
+  cvpnq=new NQS("Type","startt","endt","midt","sync","N","CVp","sync2")
+  startt=0 endt=intt midt=intt/2
+  vu=new Vector(allcells)
+  for(startt=0;startt<=tmax_INTF+1-intt;startt+=slidet){
+    endt=startt+intt
+    if(endt>=tmax_INTF) endt=tmax_INTF
+    midt=(startt+endt)/2
+    if( (N=snq.select("SpikeT",">=",startt,"SpikeT","<",endt)) > 2 ){
+      if(N>vu.size)vu.resize(N)
+      snq.out.getcol("ID").uniq(vu) N=vu.size //# of active cells
+      vs.copy(snq.out.getcol("SpikeT")) //spike times
+      vs.sort //sort spike times to make ISI for all active cells
+      vi.resize(0)
+      for idx=0,vs.size-2 vi.append(vs.x(idx+1)-vs.x(idx))
+      CVp=vi.stdev/vi.mean
+      cvpnq.append(0,startt,endt,midt,(CVp-1.)/sqrt(N),N,CVp,(CVp-1.)/sqrt(vi.size))
+    } else {
+      cvpnq.append(0,startt,endt,midt,0,0,0,0)
+    }
+    for ctt(&ct) {
+      if(skipI && ice(ct)) continue
+      if( (N=snq.select("Type",ct,"SpikeT",">=",startt,"SpikeT","<",endt)) > 2 ){
+        if(N>vu.size)vu.resize(N)
+        snq.out.getcol("ID").uniq(vu) N=vu.size //# of active cells
+        vs.copy(snq.out.getcol("SpikeT")) //spike times
+        vs.sort //sort spike times to make ISI for all active cells
+        vi.resize(0)
+        for idx=0,vs.size-2 vi.append(vs.x(idx+1)-vs.x(idx))
+        CVp=vi.stdev/vi.mean
+        cvpnq.append(ct,startt,endt,midt,(CVp-1.)/sqrt(N),N,CVp,(CVp-1.)/sqrt(vi.size))
+      } else {
+        cvpnq.append(ct,startt,endt,midt,0,0,0,0)
+      }
+    }
+  }
+  snq.verbose=1
+  return cvpnq
+}
+
+//return spike frequency NQS
+//$o1=spike nqs from SpikeNQS()
+//$2=interval [optional]
+//$3=just do types with interval [optional]
+//$4=skipI [optional] default==1
+//$5=stop time [optional]
+//$6=start time [optional]
+//$7=slide time [optional]
+obfunc FreqNQS(){ local idx,startt,endt,intt,ct,dotypes,starttime,stoptime,sp,slidet,skipI\
+                 localobj fnq,snq
+  snq=$o1 intt=$2
+  if(numarg()>2) dotypes=$3 else dotypes=0
+  if(numarg()>3) skipI=$4 else skipI=1
+  if(numarg()>4) stoptime=$5 else stoptime=tstop
+  if(numarg()>5) starttime=$6 else starttime=0
+  if(numarg()>6) slidet=$7 else slidet=intt
+  if(!dotypes){
+    fnq=new NQS("ID","Type","Freq","StartT","EndT")
+    intt=$2 startt=starttime endt=startt+intt
+    for(;startt<stoptime;startt+=slidet){
+      endt=startt+intt
+      //check length of interval, make sure it's within time bounds of run
+      if(endt >= stoptime) endt = stoptime
+      if(startt>=endt)endt=startt+1
+      for idx=0,allcells-1{
+        if(skipI && ice(ce.o(idx).type))continue
+        sp=snq.select(-1,"ID",idx,"SpikeT",">=",startt,"SpikeT","<",endt)
+        fnq.append(idx,ce.o(idx).type,1e3*sp/(endt-startt),startt,endt)
+      }
+    }
+  } else {
+    fnq=new NQS("Type","Freq","StartT","EndT")
+    intt=$2 startt=starttime endt=startt+intt
+    for(;startt<stoptime;startt+=slidet){
+      endt=startt+intt
+      //check length of interval, make sure it's within time bounds of run
+      if(endt >= stoptime) endt = stoptime
+      if(startt>=endt)endt=startt+1
+      for ctt(&ct) { 
+        if(skipI && ice(ct))continue
+        sp=snq.select(-1,"Type",ct,"SpikeT",">=",startt,"SpikeT","<",endt)
+        fnq.append(ct,1e3*sp/(numc[ct]*(endt-startt)),startt,endt)
+      }
+    }
+  }
+  return fnq
+}
+
+
+func binfindtidx () { local done,val,idx,m,lo,hi,t localobj vv
+  vv=$o1 t=$2
+  lo=0  hi=vv.size-1  m=int(vv.size/2) done=0
+  while(!done){
+    if(vv.x(m)>t){
+      hi=m m=int((hi+lo)/2.0)
+    } else if(vv.x(m)<t){
+      lo=m m=int((hi+lo)/2.0)
+    }
+    if(hi==m || lo==m) return m
+  }
+}
+
+obfunc estconmat () { local t1,t2,idx,jdx,kdx,del,st1,st2,tdx,df localobj ls,emat,vs1,vs2,vp
+  ls=$o1 del=$2  emat=new List()
+  for idx=0,ls.count-1 emat.append(new Vector(ls.count))
+  estconmat_vc(ls,del,emat)
+  return emat
+}
+
+// geteff -- get efficiency of $1 to $2 connections
+// $1 == type 1 (from)
+// $2 == type 2 (to)
+// $o3 == ls from spikelist
+// returns vector with access by index
+obfunc geteff () { local idx,jdx,kdx,ldx,ty1,ty2,tot,cnt,tt,del,fctr,cntonce\
+              localobj vt,vpo,vdel,vm,vt2,vtmp,ls,vid
+  ty1=$1  ty2=$2  ls=$o3 
+  if(numarg()>3) fctr=$4 else fctr=2
+  if(numarg()>4) cntonce=$5 else cntonce=0
+  vpo=new Vector(allcells)
+  vdel=new Vector(allcells)
+  vm=new Vector(allcells)
+  vtmp=new Vector(allcells)
+  vtmp.resize(0)
+  for idx=ix[ty1],ixe[ty1]{
+    if(idx%100==0)printf("%d.",idx)
+    if(!ls.o(idx).size) continue
+    vt=ls.o(idx)
+    ce.o(idx).getdvi(vpo,vdel)
+    tot=0
+    for jdx=0,vpo.size-1 if(ce.o(vpo.x(jdx)).type==ty2) tot+=1
+    if(!tot) continue
+    vtmp.resize(0)
+    for jdx=0,vt.size-1 { // go thru spikes
+      tt=vt.x(jdx)
+      cnt=0    
+      for kdx=0,vpo.size-1{ // go thru outputs
+        if(ce.o(vpo.x(kdx)).type!=ty2) continue
+        del=vdel.x(kdx)
+        vt2=ls.o(vpo.x(kdx))
+        for ldx=0,vt2.size-1{ // check spiketimes of each output
+          if(vt2.x(ldx) >= tt+del && vt2.x(ldx) <= tt+fctr*del){ // within range?
+            cnt += 1
+            if(cntonce) break // only count once? then break
+          }
+        }
+      }
+      vtmp.append(cnt/tot)
+    }
+    if(vtmp.size) vm.x(idx)=vtmp.mean
+  }
+  printf("\n")
+  return vm
+}
+
+// get efficiency of excitatory connections between populations in a given path
+// specified by $o1 , i.e. $o1 = new Vector(layer4,layer2,layer5,layer6,layer4)
+// $o2 == ls , from spikelist(...)
+// $3 == delay fctr for geteff
+// returned as NQS
+obfunc getpatheffnq () { local fctr,cntonce localobj vpath,nqp,ve,ls
+  vpath=$o1
+  ls=$o2
+  fctr=$3
+  if(numarg()>3) nqp=$o4 else nqp=new NQS("ID","from","to","e")
+  if(numarg()>4) cntonce=$5 else cntonce=0
+  for idx=0,vpath.size-2 {
+    printf("eff from %s to %s: ",CTYP.o(vpath.x(idx)).s,CTYP.o(vpath.x(idx+1)).s)
+    ve=geteff(vpath.x(idx),vpath.x(idx+1),ls,fctr,cntonce)
+    for jdx=ix[vpath.x(idx)],ixe[vpath.x(idx)]{
+      nqp.append(jdx,vpath.x(idx),vpath.x(idx+1),ve.x(jdx))
+    }
+  }
+  return nqp
+}

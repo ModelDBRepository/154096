@@ -1,0 +1,68 @@
+// $Id: makepopspikenq.hoc,v 1.6 2010/10/11 14:16:47 samn Exp $ 
+
+
+// uses batch data to make nqs with population spike info
+
+{colW=colH=3 mytstop=1e3}
+
+strdef strrcs
+strrcs="nqsnet.hoc,65,network.hoc,125,params.hoc,112,run.hoc,53,nload.hoc,182"
+rcsopen(strrcs) // load sim from RCS
+
+mytstop=htmax=tstop=20e3
+
+rcsopen("load.hoc",87)
+
+objref nqspk
+nqspk=new NQS("sidx","SIMTYP","DISCONCOL","col","spks","binsz","avgE","spkth")
+objref vspkth,vbinsz
+{vspkth=new Vector() vspkth.append(0.05,0.1,0.15,0.2,0.25,0.3,0.35,0.4,0.45,0.5)}
+vbinsz=new Vector()
+vbinsz.append(10,15,20,25,30,35,40,45,50)
+objref nqtmp
+nqtmp=new NQS(1)
+nqtmp.s[0].s="E"
+nqtmp.verbose=0
+proc myrspks () { local i,j,k,l,Espks,th,spkth
+  for i=0,nqbatch.v.size-1 {
+    print "sidx " , i
+    {myloadone(i) SIMTYP=nqbatch.get("SIMTY",i).x DISCONCOL=nqbatch.get("DISCONCOL",i).x}
+    for vtr(&binsz,vbinsz) { 
+      print "sidx " , i , " binsz " , binsz
+      initAllMyNQs()
+      nqtmp.v.resize(nqCTY.v[E2].size)
+      for vtr(&spkth,vspkth) { th=int(spkth*col.ecells)
+        for j=0,numcols-1 { nqtmp.v.fill(0)
+          for col.ctt(&k) if(!ice(k)) nqtmp.v.add(nqCTY[j].v[k])
+          Espks=nqtmp.select("E",">=",th)
+          if(Espks>0) print Espks
+          nqspk.append(i,SIMTYP,DISCONCOL,j,Espks,binsz,nqtmp.v.mean,spkth)
+        }
+      }
+    }
+  }
+  nqspk.sv("/u/samn/intfcol/data/10oct10_E_SPKS_D.nqs")
+}
+
+//* prit - print stats
+proc prit () { local i,bsz,th,a localobj vec
+  nqspk.verbose=0 bsz=$1 th=$2 a=allocvecs(vec)
+  print "totals"
+  for case(&SIMTYP,0,E2,I2,-E2,&i) for DISCONCOL=0,1 {
+    if(nqspk.select("SIMTYP",SIMTYP,"DISCONCOL",DISCONCOL,"spkth",th,"binsz",bsz)) {
+      print "SIMTYP ",SIMTYP,"DISCONCOL ",DISCONCOL,nqspk.getcol("spks").sum
+    }
+  }
+  print "\nper minute:"
+  for case(&SIMTYP,0,E2,I2,-E2,-I2,&i) for DISCONCOL=0,1 {
+    if(nqspk.select("SIMTYP",SIMTYP,"DISCONCOL",DISCONCOL,"spkth",th,"binsz",bsz)) {
+      vec.resize(0) vec.copy(nqspk.getcol("spks"))
+      print "SIMTYP ",SIMTYP,"DISCONCOL ",DISCONCOL,"E:",3*vec.mean,"per minute"
+    }
+  }
+  dealloc(a)
+  nqspk.verbose=1
+}
+
+// time("myrspks()") // 24.090833 m
+
