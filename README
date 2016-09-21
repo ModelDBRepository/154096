@@ -121,3 +121,6 @@ batchscripts/<script>
        |_ sim.hoc
          |  sim setup files
          |  alz.hoc
+
+20160921 This version incorporates fixes that allows the model to run
+on mac OS X.

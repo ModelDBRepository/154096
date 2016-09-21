@@ -5,7 +5,7 @@
 #include <limits.h> /* contains LONG_MAX */
 #include <time.h>
 #include <sys/time.h> 
-#include <values.h>
+#include <float.h>
 #include <pthread.h>
 
 #if !defined(t)
@@ -30,10 +30,10 @@ typedef struct BVEC {
 #define BYTEHEADER int _II__;  char *_IN__; char _OUT__[16]; int BYTESWAP_FLAG=0;
 #define BYTESWAP(_X__,_TYPE__) \
     if (BYTESWAP_FLAG == 1) { \
-	_IN__ = (char *) &(_X__); \
-	for (_II__=0;_II__<sizeof(_TYPE__);_II__++) { \
-		_OUT__[_II__] = _IN__[sizeof(_TYPE__)-_II__-1]; } \
-	(_X__) = *((_TYPE__ *) &_OUT__); \
+    _IN__ = (char *) &(_X__); \
+    for (_II__=0;_II__<sizeof(_TYPE__);_II__++) { \
+        _OUT__[_II__] = _IN__[sizeof(_TYPE__)-_II__-1]; } \
+    (_X__) = *((_TYPE__ *) &_OUT__); \
     }
 
 #define UNCODE(_X_,_J_,_Y_) {(_Y_)=floor((_X_)/sc[(_J_)])/sc[4]; \
@@ -50,14 +50,14 @@ typedef struct BVEC {
 #define dmaxuint 4294967295. // for 32 bits
 
 // Andre Fentons cast designations
-typedef	unsigned char	ui1;	/* one byte unsigned integer */
-typedef	char		si1;	/* one byte signed integer */
-typedef unsigned short	ui2;	/* two byte unsigned integer */
-typedef short		si2;	/* two byte signed integer */
-typedef unsigned int	ui4;	/* four byte unsigned integer */ 
-typedef int		si4;	/* four byte signed integer */ 
-typedef float		sf4;	/* four byte signed floating point number */ 
-typedef double		sf8;	/* eight byte signed floating point number */ 
+typedef unsigned char   ui1;    /* one byte unsigned integer */
+typedef char        si1;    /* one byte signed integer */
+typedef unsigned short  ui2;    /* two byte unsigned integer */
+typedef short       si2;    /* two byte signed integer */
+typedef unsigned int    ui4;    /* four byte unsigned integer */ 
+typedef int     si4;    /* four byte signed integer */ 
+typedef float       sf4;    /* four byte signed floating point number */ 
+typedef double      sf8;    /* eight byte signed floating point number */ 
 
 extern double ERR,GET,SET,OK,NOP,ALL,NEG,POS,CHK,NOZ,GTH,GTE,LTH,LTE,EQU;
 extern double EQV,EQW,EQX,NEQ,SEQ,RXP,IBE,EBI,IBI,EBE;
@@ -132,3 +132,8 @@ extern double ismono1 (double *x, int n, int flag);
 double kcorfast(double* input1, double* input2, double* i1d , double* i2d,int n,double* ps);
 double Rktau (double* x, double* y, int n); // R version
 double kcorfast (double* input1, double* input2, double* i1d , double* i2d,int n,double* ps);
+
+
+
+
+

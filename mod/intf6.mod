@@ -26,14 +26,14 @@ VERBATIM
 
 static int ctt(unsigned int, char**);
 static int setdvi2(double*,double*,char*,int,int,double*,double*);
+static int setdvi3(double*,double*,char*,int,double*,double*);
+void freesywv();
 // Definitions for synaptic scaling procs
-void raise_activity_sensor(double time, double weight);
+void raise_activity_sensor(double time);
 void decay_activity_sensor(double time);
-void raise_firingrate_sensor(double time);
-void decay_firingrate_sensor(double time);
 void update_scale_factor(double time);
 void dynamicdelete(double time);
-double calculate_growth_factor_scale_amount();
+double get_avg_activity();
 
 #define PI 3.14159265358979323846264338327950288419716939937510
 #define nil 0
@@ -98,14 +98,18 @@ typedef struct ID0 {
   double* pplastinc; // plasticity inc for synapse (max inc)
   double* pplastmaxw; // max weight gain for plasticity
   double* pdope; // dopamine eligibility
+
+  ////////////////////////////////////////////////////////////////////////////////////////////////
+  //     THE PARAMETERS IN THIS 'BLOCK' ARE ASSOCIATED WITH HOMEOSTATIC SYNAPTIC SCAING
   double activity; // Slow-varying cell activity value
-  double firingrate; // Firing rate value which uses similar mechanism to activity sensor
   double max_err; // Maximum saturation value for the activity sensor
   double max_scale; // Maximum scaling factor
   double lastupdate; // Time of last activity sensor decay / spike update
   double goal_activity; // Target firing rate  
   double activity_integral_err; // Integral record of cell's activity divergence from target activity
   double scalefactor; // Derived activity-dependent scaling factor, by which to multiply AMPA weights
+  ////////////////////////////////////////////////////////////////////////////////////////////////
+
   int* peconv; // IDs of E cells converging on this cell
   int econvsz; // # of E cells converging on this cell
   int* piconv; // IDs of I cells convering on this cell
@@ -144,17 +148,7 @@ typedef struct ID0 {
 } id0;
 
 // globals -- range vars must be malloc'ed in the CONSTRUCTOR
-static int scaling;// Is compensatory scaling switched on for all cells? Default is off. Globally set.
-static int dynamicdel; // Is dynamic scaling factor-proportional deletion switched on? Default is off.
-static double delspeed; // Rate constant for spontaneous deletion (Alzheimer's experiments)
-static int scaleinhib; // Set to TRUE for I-cell scaling in addition to E-cell scaling. Default is off.
-static int growthfactorscaling; // Set to TRUE for growth-factor-related (BDNF/TNF-a) scaling
-static double activitytau; // Activity time constant (ms^-1)  
-static double activitybeta; // Scaling strength constant (s^-1 Hz^-1)
-static double activitygamma; // Scaling update constant (s^-2 Hz^-1)
-static double activityoneovertau; // Store 1/tau for faster calculations
-static double network_goal_activity; // Global network activity for growth-factor-related scaling
-static double growth_factor_scale_amount; // Global growth factor scaling weight
+static double activityoneovertau; // for homeostatic synaptic scaling: Store 1/tau for faster calculations
 static vpt *vp; // vp, pg, ip are used as temporary pointers
 static id0 *ip, *qp, *rp;
 static int inumcols=0;
@@ -252,8 +246,18 @@ NEURON {
   GLOBAL EXPELIGTR : use an exponential decay for the eligibility traces?
   GLOBAL maxeligtrdur: maximum eligibilty trace duration (in ms)
   GLOBAL reseteligtr : reset eligibility trace after synapse rewarded/punished  
+
+  : VARIABLES RELATING TO HOMEOSTATIC SYNAPTIC SCALING (IMPLEMENTED BY MARK ROWAN)
+  GLOBAL scaling            : Is compensatory scaling switched on for all cells? Default is off. Globally set.
+  GLOBAL dynamicdel         : Is dynamic scaling factor-proportional deletion switched on? Default is off.
+  GLOBAL delspeed           : Rate constant for spontaneous deletion (Alzheimer's experiments)
+  GLOBAL scaleinhib         : Set to TRUE (1) for I-cell scaling in addition to E-cell scaling. Default is off (0).
+  GLOBAL activitytau        : Activity time constant (ms^-1)  
+  GLOBAL activitybeta       : Scaling strength constant (s^-1 Hz^-1)
+  GLOBAL activitygamma      : Scaling update constant (s^-2 Hz^-1)
 }
 
+: PARAMETER block - sets all variables to defaults at start
 PARAMETER {
   tauAM = 10 (ms)
   tauNM = 300 (ms)
@@ -329,6 +333,15 @@ PARAMETER {
   EXPELIGTR = 1 : turn on exponential decay of eligibilty traces by default
   maxeligtrdur = 100.0 : set maximum eligibility trace time to 100 ms by default
   reseteligtr = 0 : don't reset by default
+
+  : default values for homeostatic synaptic scaling
+  scaling = 0                          : Compensatory synaptic scaling defaults to 'off'
+  dynamicdel = 0                       : Dynamic deletion defaults to 'off'
+  delspeed = 0.0                       : Rate constant for dynamic deletion
+  scaleinhib = 0                       : Whether or not we should scale I cells as well as E cells
+  activitytau = 100.0e3                : Activity sensor time constant (ms^-1) (van Rossum et al., 2000)
+  activitybeta = 4.0e-8                : was e-5 Scaling strength constant (s^-1 Hz^-1) (van Rossum et al., 2000)
+  activitygamma = 1.0e-10              : was e-7 Scaling update constant (s^-2 Hz^-1) (van Rossum et al., 2000)
 }
 
 ASSIGNED {
@@ -360,25 +373,18 @@ CONSTRUCTOR {
     ip->rve=-1;
     pathbeg=-1;
     slowset=0;
-    scaling=0; // Compensatory synaptic scaling defaults to 'off'
-    dynamicdel=0; // Dynamic deletion defaults to 'off'
-    delspeed = 0.0; // Rate constant for dynamic deletion
-    scaleinhib=0; // Whether or not we should scale I cells as well as E cells
-    growthfactorscaling=0; // Whether we should add additional global growth-factor scaling
-    activitytau = 100.0e3; // Activity sensor time constant (ms^-1) (van Rossum et al., 2000)
-    activitybeta = 4.0e-8; // was e-5 Scaling strength constant (s^-1 Hz^-1) (van Rossum et al., 2000)
-    activitygamma = 1.0e-10; // was e-7 Scaling update constant (s^-2 Hz^-1) (van Rossum et al., 2000)
-    activityoneovertau = 1.0/activitytau; // Store fixed value of 1/tau
-    network_goal_activity = 0; // Global network activity target value (MHz)
-    growth_factor_scale_amount = 1; // Initially, growth factors have no effect
+
+    ////////////////////////////////////////////////////////////////////////////////////////////////
+    //     THE PARAMETERS IN THIS 'BLOCK' ARE ASSOCIATED WITH HOMEOSTATIC SYNAPTIC SCAING
     ip->activity = 0; // Sensor for this cell's recent activity (default 0MHz i.e. cycles per ms)
-    ip->firingrate = 0; // Sensor for this cell's recent firing rate (default 0MHz i.e. cycles per ms)
     ip->max_err = 0; // Max error value
     ip->max_scale = 100; // Max scaling factor
     ip->lastupdate = 0; // Time of last activity sensor decay / spike update
     ip->scalefactor = 1.0; // Default scaling factor for this cell's AMPA synapses
     ip->goal_activity = -1; // Cell's target activity (MHz i.e. cycles per ms)
     ip->activity_integral_err = 0.0; // Integral of cell's activity divergence from target activity
+    ////////////////////////////////////////////////////////////////////////////////////////////////
+
     ip->gid = nextGID; nextGID += 1.0;// global identifier
     process=(int)getpid();
     CNAME[SU]="SU"; CNAME[DP]="DP"; CNAME[IN]="IN";
@@ -388,6 +394,20 @@ CONSTRUCTOR {
     } else installed=1.0; // set or reset it
     cbsv=0x0;
   }
+  ENDVERBATIM
+}
+
+PROCEDURE resetscaling () {
+  VERBATIM
+  ip = IDP;
+  //     THE PARAMETERS IN THIS 'BLOCK' ARE ASSOCIATED WITH HOMEOSTATIC SYNAPTIC SCAING
+  ip->activity = 0; // Sensor for this cell's recent activity (default 0MHz i.e. cycles per ms)
+  ip->max_err = 0; // Max error value
+  ip->max_scale = 100; // Max scaling factor
+  ip->lastupdate = 0; // Time of last activity sensor decay / spike update
+  ip->scalefactor = 1.0; // Default scaling factor for this cell's AMPA synapses
+  ip->goal_activity = -1; // Cell's target activity (MHz i.e. cycles per ms)
+  ip->activity_integral_err = 0.0; // Integral of cell's activity divergence from target activity
   ENDVERBATIM
 }
 
@@ -430,6 +450,17 @@ INITIAL { LOCAL id
     net_send(0,2) 
   } : send at time 0
   rebeg=0 : will reset this to restart storage for rec,wrec
+
+  : 
+  : SN - NB - SHOULD PROBABLY RESET AT LEAST SOME OF THE
+  : PARAMS ASSOCIATED WITH HOMEOSTATIC SYNAPTIC SCALING HERE
+  : 
+  :  Store fixed value of 1/tau - users should not modify this!!
+VERBATIM
+  activityoneovertau = 1.0 / activitytau; //@
+
+ENDVERBATIM
+  : resetscaling()
 }
 
 PROCEDURE reset () {
@@ -478,7 +509,10 @@ FUNCTION DVIDSeed(){
 NET_RECEIVE (wAM,wNM,wGA,wGB,wAM2,wNM2,wGA2,wflg) { LOCAL tmp,jcn,id
   INITIAL { wAM=wAM wNM=wNM wGA=wGA wGB=wGB wAM2=wAM2 wNM2=wNM2 wGA2=wGA2 wflg=0}
   : intra-burst, generate next spike as needed
+VERBATIM
   id0 *ppre; int prty,poty,prin,prid,poid,ii,sy,nsyn,distal; double STDf,wgain,syw1,syw2; //@
+
+ENDVERBATIM
   tmax=t
   VERBATIM
   if (stopoq && !qsz()) stoprun=1;
@@ -519,13 +553,42 @@ NET_RECEIVE (wAM,wNM,wGA,wGB,wAM2,wNM2,wGA2,wflg) { LOCAL tmp,jcn,id
     }
   }
 
+  // MR: Synaptic scaling and deletion logic
+  if (dynamicdel) {
+    dynamicdelete(t); // Calculate probabilistically whether or not this cell should die
+  }
+  // SN - is the following line needed when not running synaptic scaling?
+  decay_activity_sensor(t); // Allow activity sensor to decay on every update
+
+  if (scaling) {
+    if (ip->goal_activity < 0) {
+      // If scaling has just been turned on, set goal activity to historical average firing rate
+      // This is only meaningful if sensor has had a chance to measure correct activity over
+      // a relatively long period of time, so don't call setscaling(1) until at least ~800s.
+      //ip->goal_activity = get_avg_activity();
+      ip->goal_activity = ip->activity; // Take current activity sensor value
+      //ip->max_err = ip->goal_activity * 0.5; // Error value saturates at +- 50% of goal activity rate
+    }
+
+    if (!ip->inhib || scaleinhib) {
+      // Only update if cell is not inhib OR we are scaling all I+E cells
+      update_scale_factor(t); // Run synaptic scaling procedure to find scalefactor
+    }  
+  }
+  ip->lastupdate = t; // Store time of last update
+  
+
+
   if (_lflag==OK) { FLAG=OK; flag(); return; } // identify internal call with errflag
   if (_lflag<0) { callback(_lflag); return; }
   pg->eventtot+=1;
 
   // if(flag==0) { printf("flag==0!\n"); }
   ENDVERBATIM
-  if (ip->dbx>2) { //@ dbx==debug flag; NB @ means VERBATIM block
+VERBATIM
+  if (ip->dbx>2) 
+ENDVERBATIM
+{ 
     pid() 
     printf("DB0: flag=%g Vm=%g",flag,VAM+VNM+VGA+RMP+AHP+VAM2+VNM2+VGA2)
     if (flag==0) { printf(" (%g %g %g %g %g %g %g)",wAM,wNM,wGA,wAM2,wNM2,wGA2,wflg) }
@@ -550,9 +613,6 @@ NET_RECEIVE (wAM,wNM,wGA,wGB,wAM2,wNM2,wGA2,wflg) { LOCAL tmp,jcn,id
       syw2=_args[3]; // save value -- for non-MATRIX weight 2 -- only used when wsetting==1
       if(ip->dbx<-1) printf("prid%d,poid%d,wgain=%g\n",prid,poid,wgain); 
       for (ii=0;ii<=6;ii++) _args[ii]=0.; // clear _args (stores weights for later) to be safe
-
-      // REMEMBER: SYW1 HOLDS AM/AM2/GA/GA2, SYW2 HOLDS NM/NM2
-
       if (seadsetting==3) { // plasticity mode is on
         ppre = getlp(pg->ce,prid);  // get pointer to presynaptic cell
         if(ip->dbx<-1) printf("ppre%p,pre%d->po%d,wg=%g\n",ppre,prid,ip->id,wgain);
@@ -591,48 +651,35 @@ NET_RECEIVE (wAM,wNM,wGA,wGB,wAM2,wNM2,wGA2,wflg) { LOCAL tmp,jcn,id
       }
       if (nsyn==0) return; //return for 0-weight events, before changing state vars or Vm
 
+      // *** Do synaptic scaling
+      if (scaling) {
+        for (ii=sy,nsyn=0;ii<sy+2;ii++) {
+          if (!ip->inhib) {
+            // Scale E cell
+            if (ii==AM2 || ii==AM) { // || ii==NM || ii == NM2) {
+              // Scale AMPA receptors by scalefactor (Turrigiano, 2008)
+              _args[ii] *= ip->scalefactor;
+            }
+            if (ii==GA || ii==GA2) {
+              // Scale GABA receptors by 1/scalefactor to model BDNF (Chandler and Grossberg, 2012)
+              _args[ii] *= 1 / ip->scalefactor;
+            }
+          } else {
+            // Scale I cell
+            // Scaling has opposite effects on I cells (if scaling is enabled for I cells)
+            if (ii==AM2 || ii==AM) { // || ii==NM || ii == NM2) {
+              // Scale I-cell AMPA receptors by 1/scalefactor
+              _args[ii] *= 1 / ip->scalefactor;
+            }
+            if (ii==GA || ii==GA2) {
+              // Scale I-cell GABA receptors by scalefactor
+              _args[ii] *= ip->scalefactor;
+            }
 
-      // Apply homeostatic synaptic scaling
-      //if (sy>0) printf("sy %d\n", sy);
-      //if (!prin) printf("prin %d\n", prin);
-      if (scaling) { 
-        if (ip->goal_activity < 0) {
-          // If scaling has just been turned on, set goal activity to current activity sensor value
-          // This is only meaningful if sensor has had a chance to measure correct activity over
-          // a relatively long period of time, so don't call setscaling(1) until at least ~800s.
-          ip->goal_activity = ip->activity; // Take current activity sensor value
-          //ip->max_err = ip->goal_activity * 0.5; // Error value saturates at +- 50% of goal activity rate
-        }
-        if (!ip->inhib || scaleinhib) {
-          // Do synaptic scaling on the AMPA input, and inverse scaling on the GABAA input
-          // Include Inhib. cells if scaleihnib is set 
-          update_scale_factor(t); // Run synaptic scaling procedure to find scalefactor
-          if (sy == AM2 || sy == AM) {
-            _args[sy] *= ip->scalefactor;
-          }
-          if (sy == GA2 || sy == GA2) {
-            _args[sy] *= 1 / ip->scalefactor;
           }
         }
       }
-
-      // Increment intracellular activity sensor (which also determines excitotoxicity levels)
-      // for the incoming AM/AM2 spikes
-      if (sy == AM || sy == AM2) {
-        //printf("raise act: id = %d, inhib = %d, sy = %d, _args[sy] = %f, act = %f\n", ip-> id, ip->inhib, sy, _args[sy], ip->activity);
-        raise_activity_sensor(t, _args[sy]); // Incoming AM/AM2 spikes should increase calcium sensor
-        // (ideally NM/NM2 would be raised as well, but that will take some code re-jigging.
-        // Anyway, we're only scaling the AM/AM2 synapses and not the NM/NM2 synapses, plus STDP
-        // is only applied at AM/AM2).
-      }
-      decay_activity_sensor(t); // Allow calcium activity sensor to decay over time since last update
-      decay_firingrate_sensor(t); // Also allow the firing rate sensor to decay
-      // Determine whether this cell should die through excitotoxicity
-      if (dynamicdel) {
-        dynamicdelete(t);
-      }
-      ip->lastupdate = t; // Store time of last update
-  
+      // *** Done synaptic scaling
 
       if (seadsetting==3) { // empty 'if' to skip next clause
       } else if (seadsetting!=2) { // not fixed weights
@@ -649,7 +696,10 @@ NET_RECEIVE (wAM,wNM,wGA,wGB,wAM2,wNM2,wGA2,wflg) { LOCAL tmp,jcn,id
       }
     }
     ENDVERBATIM
-    if (ip->dbx>2) { //@ dbx==debug flag; NB @ means VERBATIM block
+VERBATIM
+    if (ip->dbx>2) 
+ENDVERBATIM
+{ 
       pid() 
       printf("DF: flag=%g Vm=%g",flag,VAM+VNM+VGA+RMP+AHP+VAM2+VNM2+VGA2)
       printf(" (%g %g %g %g %g %g %g)",wAM,wNM,wGA,wAM2,wNM2,wGA2,wflg)
@@ -665,35 +715,74 @@ NET_RECEIVE (wAM,wNM,wGA,wGB,wAM2,wNM2,wGA2,wflg) { LOCAL tmp,jcn,id
       net_send(refrac-AHP*AHP2REF, 3) : send event for end of refractory
     }
     tmp=t
-    if (ip->jttr) { tmp= t+jttr()/10 } //@
+VERBATIM
+    if (ip->jttr) 
+ENDVERBATIM
+{ tmp= t+jttr()/10 } 
     if (jcn) { 
       jitcon(tmp)
-      if(ip->out) { net_event(tmp) } //@
+VERBATIM
+      if(ip->out) 
+ENDVERBATIM
+{ net_event(tmp) } 
     } else { net_event(tmp) }
+VERBATIM
     spikes[ip->type]++; //@
+
+ENDVERBATIM
     spck=spck+1
-    if (ip->dbx>0) { pid() printf("DBA: mid-burst event at %g, %g\n",tmp,cbur) } //@
-    if (ip->record) { recspk(tmp) } //@ record a state var from this cell
-    if (ip->wrec) { wrecord(t) } //@ wrec records fields -- include this cell in field
+VERBATIM
+    if (ip->dbx>0) 
+ENDVERBATIM
+{ pid() printf("DBA: mid-burst event at %g, %g\n",tmp,cbur) } 
+VERBATIM
+    if (ip->record) 
+ENDVERBATIM
+{ recspk(tmp) } 
+VERBATIM
+    if (ip->wrec) 
+ENDVERBATIM
+{ wrecord(t) } 
+VERBATIM
     return; //@ done
+
+ENDVERBATIM
     : start reading random spike times (or burst times) from vsp vector pointer
     : this is signaled externally from a netstim with wflg=1, will turn off on next stim 
     : (NB wflg used in completely different context for GABAB) ?? is this still true ??
     : this is bad -- should use a special netcon that just handles signals
   } else if (flag==0 && wflg==1) {
+VERBATIM
     ip->input=1; //@
+
+ENDVERBATIM
     wflg=2 : set flag to turn off next time an external event comes from here
     randspk() 
     net_send(nxt,2)
+VERBATIM
     return; //@ done
+
+ENDVERBATIM
   } else if (flag==0 && wflg==2) { : flag to stop random spikes
+VERBATIM
     ip->input=0; //@ inputs that are read from a vector of times -- see randspk()
+
+ENDVERBATIM
     wflg=1  : flag to turn on next time
+VERBATIM
     return; //@ done
+
+ENDVERBATIM
   }
   : update state variables
-  if (ip->record) { record() } //@  
-  if (ip->wrec) { wrecord(1e9) } //@
+VERBATIM
+  if (ip->record) 
+ENDVERBATIM
+{ record() } 
+VERBATIM
+  if (ip->wrec) 
+ENDVERBATIM
+{ wrecord(1e9) } 
 :** update state variables: VAM, VNM, VGA
   if (VAM>hoc_epsilon)  { VAM = VAM*EXP(-(t - t0)/tauAM) } else { VAM=0 } :AMPA
   if (VNM>hoc_epsilon)  { VNM = VNM*EXP(-(t - t0)/tauNM) } else { VNM=0 } :NMDA
@@ -722,14 +811,20 @@ NET_RECEIVE (wAM,wNM,wGA,wGB,wAM2,wNM2,wGA2,wflg) { LOCAL tmp,jcn,id
       if (STDAM==0) { VAM = VAM + wAM*(1-Vm/EAM)
       } else        { VAM = VAM + (1-STDAM*STDf)*wAM*(1-Vm/EAM) }
       if (VAM>EAM) { 
+VERBATIM
         AMo[ip->type]++; //@
+
+ENDVERBATIM
       } else if (VAM<0) { VAM=0 }
     }
     if (wAM2>0) { : AMPA from distal dends
       if (STDAM==0) { VAM2 = VAM2 + wAM2*(1-Vm/EAM)
       } else        { VAM2 = VAM2 + (1-STDAM*STDf)*wAM2*(1-Vm/EAM) }
       if (VAM2>EAM) { 
+VERBATIM
         AMo2[ip->type]++; //@
+
+ENDVERBATIM
       } else if (VAM2<0) { VAM2=0 }
     }
     : NMDA; Mg effect based on total activation in rates()
@@ -737,14 +832,20 @@ NET_RECEIVE (wAM,wNM,wGA,wGB,wAM2,wNM2,wGA2,wflg) { LOCAL tmp,jcn,id
       if (STDNM==0) { VNM = VNM + wNM*rates(RMP+Vm)*(1-Vm/ENM) 
       } else        { VNM = VNM + (1-STDNM*STDf)*wNM*rates(RMP+Vm)*(1-Vm/ENM) }
       if (VNM>ENM) { 
+VERBATIM
         NMo[ip->type]++; //@
+
+ENDVERBATIM
       } else if (VNM<0) { VNM=0 }
     }
     if (wNM2>0 && VNM2<ENM) { : NMDA from distal dends
       if (STDNM==0) { VNM2 = VNM2 + wNM2*rates(RMP+Vm)*(1-Vm/ENM)
       } else        { VNM2 = VNM2 + (1-STDNM*STDf)*wNM2*rates(RMP+Vm)*(1-Vm/ENM) }
       if (VNM2>ENM) { 
+VERBATIM
         NMo2[ip->type]++; //@
+
+ENDVERBATIM
       } else if (VNM2<0) { VNM2=0 }
     }
     : GABAA , GABAA2 : note that all wts are positive
@@ -752,11 +853,20 @@ NET_RECEIVE (wAM,wNM,wGA,wGB,wAM2,wNM2,wGA2,wflg) { LOCAL tmp,jcn,id
       if (STDGA==0) {  VGA = VGA - wGA*(1-Vm/EGA) 
       } else {         VGA = VGA - (1-STDGA*STDf)*wGA*(1-Vm/EGA) }
       if (VGA<EGA) { 
+VERBATIM
         GAo[ip->type]++; //@
-        if (ip->dbx>2) { //@
+
+ENDVERBATIM
+VERBATIM
+        if (ip->dbx>2) 
+ENDVERBATIM
+{ 
           pid() printf("DB0A: flag=%g Vm=%g",flag,VAM+VNM+VGA+RMP+AHP+VAM2+VNM2+VGA2)
           if (flag==0) { printf(" (%g %g %g %g %g %g)",wGA,EGA,VGA,Vm,AHP,STDf) }  
+VERBATIM
           printf("\nAA:%d:%d\n\n",GAo[ip->type],ip->type); //@ 
+
+ENDVERBATIM
         }
       } else if (VGA>0) { VGA=0 } : if want reversal of VGA need to also edit above
     }
@@ -764,16 +874,28 @@ NET_RECEIVE (wAM,wNM,wGA,wGB,wAM2,wNM2,wGA2,wflg) { LOCAL tmp,jcn,id
       if (STDGA==0) {  VGA2 = VGA2 - wGA2*(1-Vm/EGA)
       } else {         VGA2 = VGA2 - (1-STDGA*STDf)*wGA2*(1-Vm/EGA) }
       if (VGA2<EGA) { 
+VERBATIM
         GAo2[ip->type]++; //@
-        if (ip->dbx>2) { //@
+
+ENDVERBATIM
+VERBATIM
+        if (ip->dbx>2) 
+ENDVERBATIM
+{ 
           pid() printf("DB0A: flag=%g Vm=%g",flag,VAM+VNM+VGA+RMP+AHP+VAM2+VNM2+VGA2)
           if (flag==0) { printf(" (%g %g %g %g %g %g)",wGA2,EGA,VGA2,Vm,AHP,STDf) }  
+VERBATIM
           printf("\nAA:%d:%d\n\n",GAo2[ip->type],ip->type); //@ 
+
+ENDVERBATIM
         }
       } else if (VGA2>0) { VGA2=0 } : if want reversal of VGA2 need to also edit above
     }
 :*** modulated interval firing; cf invlfire.mod
-    if (ip->invl0) { //@
+VERBATIM
+    if (ip->invl0) 
+ENDVERBATIM
+{ 
       Vm = RMP+VAM+VNM+VGA+AHP+VAM2+VNM2+VGA2
       if (Vm>0)   {Vm= 0 }
       if (Vm<-90) {Vm=-90}
@@ -797,13 +919,28 @@ NET_RECEIVE (wAM,wNM,wGA,wGB,wAM2,wNM2,wGA2,wflg) { LOCAL tmp,jcn,id
     if (WINV<0) { 
       if (jcn) { 
         jitcon(t)
-        if(ip->out) { net_event(t) } //@
+VERBATIM
+        if(ip->out) 
+ENDVERBATIM
+{ net_event(t) } 
       } else { net_event(t) } : bypass activation calculation
+VERBATIM
       spikes[ip->type]++; //@
+
+ENDVERBATIM
       spck=spck+1
-      if (ip->dbx>0) {pid() printf("DBC: interval event\n")}  //@      
-      if (ip->record) { recspk(t) } //@
-      if (ip->wrec) { wrecord(t) } //@
+VERBATIM
+      if (ip->dbx>0) 
+ENDVERBATIM
+{pid() printf("DBC: interval event\n")}  
+VERBATIM
+      if (ip->record) 
+ENDVERBATIM
+{ recspk(t) } 
+VERBATIM
+      if (ip->wrec) 
+ENDVERBATIM
+{ wrecord(t) } 
     } else {
       tmp = WINV*(1-Vm/EAM)
       VAM = VAM + tmp :: activate interval depolarization
@@ -812,17 +949,35 @@ NET_RECEIVE (wAM,wNM,wGA,wGB,wAM2,wNM2,wGA2,wflg) { LOCAL tmp,jcn,id
     invlt=t
     net_send(invl,1) 
   } else if (flag==2) { :** flag==2 -- read off external vec (vsp) for next random spike time or single from shock()
-    if (ip->dbx>1) {pid() printf("DBBa: randspk called: %g,%g\n",WEX,nxt)} //@
+VERBATIM
+    if (ip->dbx>1) 
+ENDVERBATIM
+{pid() printf("DBBa: randspk called: %g,%g\n",WEX,nxt)} 
     if (WEX>1e8) { : super-threshold event
       if (jcn) { 
         jitcon(t)
-        if(ip->out) { net_event(t) } //@
+VERBATIM
+        if(ip->out) 
+ENDVERBATIM
+{ net_event(t) } 
       } else { net_event(t) } : bypass activation calculation
+VERBATIM
       spikes[ip->type]++; //@
+
+ENDVERBATIM
       spck=spck+1
-      if (ip->dbx>0) {pid() printf("DBB: randspk event @ t=%g\n",t)} //@
-      if (ip->record) { recspk(t) } //@
-      if (ip->wrec) { wrecord(t) } //@
+VERBATIM
+      if (ip->dbx>0) 
+ENDVERBATIM
+{pid() printf("DBB: randspk event @ t=%g\n",t)} 
+VERBATIM
+      if (ip->record) 
+ENDVERBATIM
+{ recspk(t) } 
+VERBATIM
+      if (ip->wrec) 
+ENDVERBATIM
+{ wrecord(t) } 
     } else if (WEX>0) { : excitatory input
       if(EXSY==AM) {
         tmp = WEX*(1-Vm/EAM)
@@ -848,38 +1003,83 @@ NET_RECEIVE (wAM,wNM,wGA,wGB,wAM2,wNM2,wGA2,wflg) { LOCAL tmp,jcn,id
     }
     if (WEX!=-1e9) { : code for single shock
       randspk() : will set WEX for next time
-      if (nxt>0) { net_send(nxt,2) }
+VERBATIM
+      if (ip->input) 
+ENDVERBATIM
+{ net_send(nxt,2) } 
     }
   } else if (flag==3) { 
     refractory = 0 :end of absolute refractory period    
     trrs = t : save time of start of relative refractory period
+VERBATIM
     return; //@ done
+
+ENDVERBATIM
   }
 :** check for Vm>VTH -> fire
   Vm = VAM+VNM+VGA+RMP+AHP+VAM2+VNM2+VGA2 : WARNING -- Vm defined differently than above
   if (Vm>0)   {Vm= 0 }
   if (Vm<-90) {Vm=-90}  
   if (refractory==0 && Vm>VTHC) {
+VERBATIM
     if (!ip->vbr && Vm>Vblock) {//@ do nothing
+
+ENDVERBATIM
+VERBATIM
       ip->blkcnt++; blockcnt[ip->type]++; return; }//@
+
+ENDVERBATIM
     AHP = AHP - ahpwt
     tmp=t
     : note that jtt indicates jitter while jit indicates 'just-in-time'
-    if (ip->jttr) { tmp= t+jttr() }  //@
+VERBATIM
+    if (ip->jttr) 
+ENDVERBATIM
+{ tmp= t+jttr() }  
+VERBATIM
     //printf("spk t = %g\n",_ltmp); //@
+
+ENDVERBATIM
+VERBATIM
     //printf("a ip->pg->lastspk[%d]=%g\n",ip->id,ip->pg->lastspk[ip->id]); //@
-    raise_firingrate_sensor(t); //@ Update activity sensor
+
+ENDVERBATIM
+VERBATIM
+    raise_activity_sensor(t); //@ Update activity sensor
+
+ENDVERBATIM
+VERBATIM
     ip->pg->lastspk[ip->id]=_ltmp; //@
+
+ENDVERBATIM
+VERBATIM
     //printf("b ip->pg->lastspk[%d]=%g\n",ip->id,ip->pg->lastspk[ip->id]); //@
+
+ENDVERBATIM
     if (jcn) { 
       jitcon(tmp)
-      if(ip->out) { net_event(tmp) } //@
+VERBATIM
+      if(ip->out) 
+ENDVERBATIM
+{ net_event(tmp) } 
     } else { net_event(tmp) } 
+VERBATIM
     spikes[ip->type]++; //@
+
+ENDVERBATIM
     spck=spck+1            
-    if (ip->dbx>0) {pid() printf("DBD: %g>VTH(%g) event at %g (STDf=%g)\n",Vm,VTHC,tmp,STDf)} //@
-    if (ip->record) { recspk(tmp) } //@
-    if (ip->wrec) { wrecord(tmp) } //@
+VERBATIM
+    if (ip->dbx>0) 
+ENDVERBATIM
+{pid() printf("DBD: %g>VTH(%g) event at %g (STDf=%g)\n",Vm,VTHC,tmp,STDf)} 
+VERBATIM
+    if (ip->record) 
+ENDVERBATIM
+{ recspk(tmp) } 
+VERBATIM
+    if (ip->wrec) 
+ENDVERBATIM
+{ wrecord(tmp) } 
     if(incRR) { : additive
       VTHC=VTHC+RRWght*(Vblock-VTH):increase threshold for relative refrac. period. NB: RRWght can be < 0
       if(VTHC > Vblock) {VTHC=Vblock} else if(VTHC < RMP) {VTHC=RMP}
@@ -891,22 +1091,49 @@ NET_RECEIVE (wAM,wNM,wGA,wGB,wAM2,wNM2,wGA2,wflg) { LOCAL tmp,jcn,id
 
     if(seadsetting==3) { : apply learning rule
       if(plaststartT<0 || plastendT<0 || (t>=plaststartT && t<=plastendT)) { : make sure plasticity on now
+VERBATIM
         if(ip->dbx<-1) printf("%d@%g applying plasticity\n",ip->id,ip->pg->lastspk[ip->id]); //@
+
+ENDVERBATIM
+VERBATIM
         if(ESTDP) applyEXSTDP(ip,ip->pg->lastspk[ip->id]); //@
+
+ENDVERBATIM
+VERBATIM
         if(ISTDP) applyIXSTDP(ip,ip->pg->lastspk[ip->id]); //@
+
+ENDVERBATIM
+VERBATIM
         if(EDOPE) applyEDOPE(ip,ip->pg->lastspk[ip->id]); //@
+
+ENDVERBATIM
+VERBATIM
         if(IDOPE) applyIDOPE(ip,ip->pg->lastspk[ip->id]); //@
+
+ENDVERBATIM
       }
     }
 
     if (nbur>1) { 
       cbur=nbur-1 net_send(tbur,4) : this is main source of burst events - A.P. firing with bursting
+VERBATIM
       return; //@ done
+
+ENDVERBATIM
     } 
-  if (ip->vbr && Vm>Vblock) { //@  vbr flag for alternative VBlock
+VERBATIM
+  if (ip->vbr && Vm>Vblock) 
+ENDVERBATIM
+{ 
       net_send(Vbrefrac,3) 
-     if (ip->dbx>0) {pid() printf("DBE: %g %g\n",Vbrefrac,Vm)} //@
+VERBATIM
+     if (ip->dbx>0) 
+ENDVERBATIM
+{pid() printf("DBE: %g %g\n",Vbrefrac,Vm)} 
+VERBATIM
       return; //@ done
+
+ENDVERBATIM
     }
     net_send(refrac-AHP*AHP2REF, 3) :event for end of abs. refrac., sent separately for IB cells @ end of burst
   }
@@ -1070,7 +1297,7 @@ PROCEDURE callback (fl) {
     if (jp->sprob[i]) (*pnt_receive[jp->dvi[i]->_prop->_type])(jp->dvi[i], wts, idtflg); 
     _p=upnt->_prop->param; _ppvar=upnt->_prop->dparam; // restore pointers
     i++;
-    if (i>=jp->dvt) return; // ran out
+    if (i>=jp->dvt) return 0; // ran out
     ddel=jp->del[i]-del0;   // delays are relative to event; use difference in delays
   }
   // skip over pruned outputs and dead cells:
@@ -1094,7 +1321,7 @@ VERBATIM {
   int i,j,k,prty,poty,dv,dvt,dvii; double *x, *db, *dbs; 
   Object *lb;  Point_process *pnnt, **da, **das;
   ip=IDP; pg=ip->pg;//this should only be called after jitcondiv()
-  if (ip->dead) return;
+  if (ip->dead) return 0;
   prty=ip->type;
   sead=GetDVIDSeedVal(ip->id);//seed for divergence and delays
   for (i=0,k=0,dvt=0;i<CTYN;i++) { // dvt gives total divergence
@@ -1217,7 +1444,7 @@ FUNCTION getdvi () {
     void* voi, *voi2,*voi3; Point_process **das;
     ip=IDP; pg=ip->pg;
     getactive=a2=a3=a4=0;
-    if (ip->dead) return;
+    if (ip->dead) return 0.0;
     dvt=ip->dvt; 
     dbs=ip->del;   das=ip->dvi;
     _lgetdvi=(double)dvt; 
@@ -1499,39 +1726,53 @@ PROCEDURE clrdvi () {
     if (qp->dvt!=0x0) {
       free(qp->dvi); free(qp->del); free(qp->sprob);
       qp->dvt=0; qp->dvi=(Point_process**)0x0; qp->del=(double*)0x0; qp->sprob=(char *)0x0;
+      if(wsetting==1) freesywv(qp);
     }
   }
   ENDVERBATIM
 }
 
-: int.setdviv(prevec,postvec,delvec)
-FUNCTION setdviv () {
+: int.setdviv(prevec,postvec,delvec,distal,wt1,wt2)
+PROCEDURE setdviv () {
   VERBATIM
-  int i,j,k,l,nprv,dvt; double *prv,*pov,*dlv,x,*ds; char* s;
+  int i,j,k,l,nprv,dvt,*scr; double *prv,*pov,*dlv,x,*ds,*w1,*w2; char* s;
   ip=IDP; pg=ip->pg;
   nprv=vector_arg_px(1, &prv);
   i=vector_arg_px(2, &pov);
   j=vector_arg_px(3, &dlv);
-  s-0x0;
-  if(ifarg(4)) { s=(char*)calloc((l=vector_arg_px(4,&ds)),sizeof(char)); for(k=0;k<l;k++) s[k]=ds[k]; k=0;}
-  if (nprv!=i || i!=j) {printf("intf:setdviv ERRA: %d %d %d\n",nprv,i,j); hxe();}
+  if(ifarg(4)) { s=(char*)calloc((l=vector_arg_px(4,&ds)),sizeof(char)); for(k=0;k<l;k++) s[k]=ds[k]; k=0;
+  } else s=0x0;
+  if (nprv!=i || i!=j || j!=l) {printf("intf:setdviv ERRA: %d %d %d %d\n",nprv,i,j,l); hxe();}
+  if (wsetting==1) {
+    i=vector_arg_px(5, &w1);
+    j=vector_arg_px(6, &w2);
+    if (nprv!=i || i!=j) {printf("intf:setdviv ERRB: %d %d %d\n",nprv,i,j); hxe();}
+  }
   // start by counting the prids so will know the size that we need for realloc()
-  if (scrsz<pg->cesz) scrset(pg->cesz); 
+  scr=(int *)ecalloc(pg->cesz, sizeof(int));
   for (i=0;i<pg->cesz;i++) scr[i]=0;
   for (i=0,j=-1;i<nprv;i++) {
-    if (j>(int)prv[i]){printf("intf:setdviv ERRA vecs should be sorted by prid vec\n");hxe();}
+    if ((int)prv[i]<j) { printf("intf:setdviv ERRC vecs should be sorted by prid vec\n");hxe(); }
     j=(int)prv[i];
     scr[j]++;
   }
-  for (i=0,x=-1,k=0;i<nprv;i+=dvt) { if(i%1000==0) printf(".");
-    if (prv[i]!=x) lop(pg->ce,(unsigned int)(x=prv[i]));
+  if (ip->dbx>1) for (i=0;i<pg->cesz;i++) printf("%d ",scr[i]);
+  for (i=-1,k=0;k<nprv;k+=dvt) { if(i%1000==0) printf(".");
+    if ((int)prv[k]==i) {printf("intf:setdviv ERRD number repeated %g %d %d\n",prv[k],i,k);hxe();}
+    i=(int)prv[k]; // index for presyn cell
+    lop(pg->ce,i); // set the container to that cell
+    dvt=scr[i]; // the number of postsyns for that
+    if (ip->dbx>0) printf("DBA:%d,%d,%d ",i,dvt,k);
     if (qp->dead) continue;
-    dvt=scr[(int)x]; // number of these presyns
-    setdvi2(pov+k,dlv+k,s?s+k:0x0,dvt,1,0x0,0x0);
-    k+=dvt;
+    if (dvt>0) {
+      if (wsetting==1) {
+        setdvi3(pov+k,dlv+k,s+k,dvt,w1+k,w2+k); // no flag -- will just replace the divergence list
+      } else {
+        setdvi2(pov+k,dlv+k,s?s+k:0x0,dvt,1,0x0,0x0);
+      }
+    }
   }
   if(s) free(s);
-  return (double)k;
   ENDVERBATIM
 }
 
@@ -1952,9 +2193,9 @@ FUNCTION getplast () {
 PROCEDURE setdvi () {
 VERBATIM {
   int i,j,k,dvt,flag; double *d, *y, *ds, *w1, *w2; char* s;
-  if (! ifarg(1)) {printf("setdvi(v1,v2[,v3,flag]): v1:cell#s; v2:delays; v3:distal synapses\n"); return; }
+  if (! ifarg(1)) {printf("setdvi(v1,v2[,v3,flag]): v1:cell#s; v2:delays; v3:distal synapses\n"); return 0; }
   ip=IDP; pg=ip->pg; // this should only be called after jitcondiv()
-  if (ip->dead) return;
+  if (ip->dead) return 0;
   dvt=vector_arg_px(1, &y);
   i=vector_arg_px(2, &d);
   s=ifarg(3)?(char*)calloc((j=vector_arg_px(3,&ds)),sizeof(char)):0x0;
@@ -1971,7 +2212,7 @@ ENDVERBATIM
 }
 
 VERBATIM
-// setdvi2(divid_vec,del_vec,syns_vec,div_cnt,flag)
+// setdvi2(divid_vec,del_vec,syns_vec,div_cnt,flag,w1,w2)
 // flag 1 means just augment, 0or2: sort by del, 0: clear lists and replace
 static int setdvi2 (double *y,double *d,char* s,int dvt,int flag,double* w1,double* w2) {
   int i,j,ddvi; double *db, *dbs, *w1s, *w2s; unsigned char pdead; unsigned int b,e; char* syns;
@@ -2038,6 +2279,36 @@ static int setdvi2 (double *y,double *d,char* s,int dvt,int flag,double* w1,doub
 }
 ENDVERBATIM
 
+VERBATIM
+// setdvi3(divid_vec,del_vec,syns_vec,div_cnt,w1,w2)
+// based on setdvi2() but uses qp statt IDP and does reallocs
+static int setdvi3 (double *y, double *d, char* s, int dvt, double* w1, double* w2) {
+  int i,j,ddvi; double *db, *dbs, *w1s, *w2s; unsigned char pdead; unsigned int b,e; char* syns;
+  Object *lb; Point_process *pnnt, **da, **das;
+  ddvi=(int)DEAD_DIV;
+  ip=qp; pg=ip->pg;
+  e=dvt; // begin to end
+  da=(Point_process **)realloc((void*)ip->dvi,(size_t)(e*sizeof(Point_process *)));
+  db=(double*)realloc((void*)ip->del,(size_t)(e*sizeof(double)));
+  syns=(char*)realloc((void*)ip->syns,(size_t)(e*sizeof(char)));  
+  w1s=(double*)realloc((void*)ip->syw1,(size_t)(e*sizeof(double)));
+  w2s=(double*)realloc((void*)ip->syw2,(size_t)(e*sizeof(double)));
+  for (i=0,j=0;j<dvt;i++,j++) { // i thru da[] j thru y, k to append
+    // div can grow at lower rate if dead cells are encountered
+    if (!(lb=ivoc_list_item(pg->ce,(unsigned int)y[j]))) {
+      printf("INTF6:callback %g exceeds %d for list ce\n",y[j],pg->cesz); hxe(); }
+      pnnt=(Point_process *)lb->u.this_pointer;
+      if (ddvi==1 || !(pdead=(*(id0**)&(pnnt->_prop->dparam[2]))->dead)) {
+        da[i]=pnnt; db[i]=d[j]; syns[i]=s?s[j]:0; 
+        w1s[i]=w1[j]; w2s[i]=w2[j];
+      }
+  }
+  ip->dvt=dvt; ip->del=db; ip->dvi=da; ip->syns=syns;
+  ip->syw1=w1s; ip->syw2=w2s;
+  finishdvi2(ip); // do sort
+}
+ENDVERBATIM
+
 : prune(p[,potype,rand_seed]) // prune synapses with prob p [0,1], ie 0.1 prunes 10% of the divergence
 : prune(vec) // fill in the pruning vec with binary values from vec
 PROCEDURE prune () {
@@ -2053,7 +2324,7 @@ PROCEDURE prune () {
       printf("INTF6pruneB:Div exceeds dscrsz: %d>%d\n",ip->dvt,dscrsz); hxe(); }
     if (p==0.) {
       for (j=0;j<ip->dvt;j++) ip->sprob[j]=1; // unprune completely
-      return; // now that unpruning is done, can return
+      return 0; // now that unpruning is done, can return
     }
     potype=ifarg(2)?(int)*getarg(2):-1;
     sead=(ifarg(3))?(unsigned int)*getarg(3):GetDVIDSeedVal(ip->id);//seed for divergence and delays
@@ -2159,24 +2430,28 @@ int gsort5 (double *db, Point_process **da, char* syns, double* w1,double* w2, i
     w2s[i]=w2[scr[i]];
   }
 }
+
+static int freedvi2 (struct ID0* jp) {
+  if (jp->dvi) {
+    free(jp->dvi); free(jp->del); free(jp->sprob); free(jp->syns);
+    if(jp->wgain){free(jp->wgain); jp->wgain=0x0;}
+    if(jp->peconv){free(jp->peconv); jp->peconv=0x0;}
+    if(jp->piconv){free(jp->piconv); jp->piconv=0x0;}
+    if(ip->pplasttau){free(ip->pplasttau);ip->pplasttau=0x0;}
+    if(ip->pplastinc){free(ip->pplastinc);ip->pplastinc=0x0;}
+    if(ip->pplastmaxw){free(ip->pplastmaxw);ip->pplastmaxw=0x0;}
+    if(ip->pdope){free(ip->pdope);ip->pdope=0x0;}
+    jp->dvt=0; jp->dvi=(Point_process**)0x0; jp->del=(double*)0x0; jp->sprob=(char *)0x0; jp->syns=(char *)0x0;
+  }
+}
 ENDVERBATIM
 
 PROCEDURE freedvi () {
   VERBATIM
   { 
-    int i, poty; id0 *jp;
+    id0 *jp;
     jp=IDP;
-    if (jp->dvi) {
-      free(jp->dvi); free(jp->del); free(jp->sprob); free(jp->syns);
-      if(jp->wgain){free(jp->wgain); jp->wgain=0x0;}
-      if(jp->peconv){free(jp->peconv); jp->peconv=0x0;}
-      if(jp->piconv){free(jp->piconv); jp->piconv=0x0;}
-      if(ip->pplasttau){free(ip->pplasttau);ip->pplasttau=0x0;}
-      if(ip->pplastinc){free(ip->pplastinc);ip->pplastinc=0x0;}
-      if(ip->pplastmaxw){free(ip->pplastmaxw);ip->pplastmaxw=0x0;}
-      if(ip->pdope){free(ip->pdope);ip->pdope=0x0;}
-      jp->dvt=0; jp->dvi=(Point_process**)0x0; jp->del=(double*)0x0; jp->sprob=(char *)0x0; jp->syns=(char *)0x0;
-    }
+    freedvi2(jp);
   }
   ENDVERBATIM
 }
@@ -2247,6 +2522,63 @@ PROCEDURE mywmatpr () {
   ENDVERBATIM
 }
 
+
+: intf.cinit() is alternative to jitcondiv() that just sets up cell specific params
+PROCEDURE cinit () {
+  VERBATIM {
+  Symbol *sym; int i,j; unsigned int sz,colid; char *name;
+
+  pg=(postgrp *)calloc(1,sizeof(postgrp));
+  colid = (int)*getarg(2);
+
+  if(ppg==0x0) { // initial allocation
+    ippgbufsz = 5;
+    ppg = (postgrp**) calloc(ippgbufsz,sizeof(postgrp*));
+    inumcols = 1;
+  } else inumcols++;
+
+  if(inumcols >= ippgbufsz) { // need more memory? then realloc
+    ippgbufsz *= 2;
+    ppg = realloc((void*)ppg,(size_t)ippgbufsz*sizeof(postgrp*));
+  }
+  ppg[inumcols-1] = pg;
+  pg->col = colid;
+  pg->ce =  *hoc_objgetarg(1);
+
+  sym = hoc_lookup("CTYP"); 
+  CTYP = (*(hoc_objectdata[sym->u.oboff].pobj));
+
+  if (installed==2.0) { // jitcondiv was previously run
+    sz=ivoc_list_count(pg->ce);
+    if (sz==pg->cesz && colid==0) printf("\t**** INTF6 WARNING cesz unchanged: INTF6(s) created off-list ****\n");
+  } else installed=2.0;
+  pg->cesz = ivoc_list_count(pg->ce); if(verbose) printf("cesz=%d\n",pg->cesz);
+  pg->lastspk = calloc(pg->cesz,sizeof(double)); // last spike time of each cell
+  // not column specific
+  CTYPi=HVAL("CTYPi"); STYPi=HVAL("STYPi"); dscrsz=HVAL("scrsz"); dscr=HPTR("scr");
+  // column specific
+  pg->ix = hoc_pgetarg(3);
+  pg->ixe = hoc_pgetarg(4);
+  pg->numc = hoc_pgetarg(5); // numc
+  if(verbose){printf("CTYPi=%d\n",CTYPi);
+    for(i=0;i<CTYPi;i++) printf("ix[%d]=%g, ixe[%d]=%g\n",i,pg->ix[i],i,pg->ixe[i]);}
+  if (!pg->ce) {printf("INTF6 cinit() ERRA: ce not found\n"); hxe();}
+  if (ivoc_list_count(CTYP)!=CTYPi){
+    printf("INTF6 cinit() ERRB: %d %d\n",ivoc_list_count(CTYP),CTYPi); hxe(); }
+  for (i=0;i<pg->cesz;i++) { lop(pg->ce,i); qp->pg=pg; } // set all of the pg pointers for now
+  printf("Checking for possible seg error in double arrays: CTYPi==%d: ",CTYPi);
+  printf("%d %g\n",dscrsz,dscr[dscrsz-1]); // scratch area for doubles
+  for (i=0,j=0;i<CTYPi;i++) if (ctt(i,&name)!=0) {
+    cty[j]=i; CNAME[j]=name; ctymap[i]=j;
+    j++;
+    if (j>=CTYPp) {printf("jitcondiv() INTERRA\n"); hxe();}
+  }
+  CTYN=j; // number of cell types being used
+  for (i=0;i<CTYN;i++) printf("%s(%d)=%g ",CNAME[i],cty[i],NUMC(cty[i]));
+  printf("\n%d cell types being used in col %d\n",CTYN,colid);
+  }
+  ENDVERBATIM  
+}
 
 : intf.jitcondiv() assigns pointers for hoc symbol storage
 PROCEDURE jitcondiv () {
@@ -2328,7 +2660,7 @@ PROCEDURE jitrec () {
   if(verbose>1) printf("jitrec from col %d, ip=%p, pg=%p\n",ip->col,ip,pg);
   if (! ifarg(2)) { // clear with jitrec() or jitrec(0)
     pg->jrmax=0; pg->jridv=0x0; pg->jrtvv=0x0;
-    return;
+    return 0;
   }
   i =   vector_arg_px(1, &pg->jrid); // could just set up the pointers once
   pg->jrmax=vector_arg_px(2, &pg->jrtv);
@@ -2429,7 +2761,7 @@ PROCEDURE randspk () {
   ip=IDP; pg=ip->pg;
   if (ip->rvi > ip->rve) { // pointers go from rvi to rve inclusive
     ip->input=0;           // turn off
-    nxt=-1; // MR: Commented out because it kills off the net_send / NET_RECEIVE feedback
+    //nxt=-1.; // MR: Commented this out because it kills off the net_send / NET_RECEIVE feedback
                 // loop once the input spike vecs have finished. If we then push more spikes to the net
                 // at a later time, they'll never get picked up if nxt=-1 as the loop is dead.
   } else if (t==0) {     // initialization
@@ -2487,8 +2819,8 @@ PROCEDURE record () {
   VERBATIM {
   int i,j,k,nz; double ti;
   vp = SOP;
-  if(!vp) {printf("**** record ERRA: vp=NULL!\n"); return;}
-  if (tg>=t) return;
+  if(!vp) {printf("**** record ERRA: vp=NULL!\n"); return 0;}
+  if (tg>=t) return 0;
   if (ip->record==1) {
     while ((int)vp->p >= (int)vp->size-(int)((t-tg)/vdt)-10) { 
       vp->size*=2;
@@ -2526,7 +2858,7 @@ PROCEDURE recspk (x) {
   VERBATIM { 
   vp = SOP;
   record();
-  if (vp->p > vp->size || vp->vvo[6]==0) return; 
+  if (vp->p > vp->size || vp->vvo[6]==0) return 0; 
   if (vp->p > 0) {
     if (vp->vvo[0]!=0x0) vp->vvo[0][vp->p-1]=_lx;
     vp->vvo[6][vp->p-1]=spkht; // the spike
@@ -2576,7 +2908,7 @@ PROCEDURE initvspks () {
   {int max, i,err;
     double last,lstt;
     ip=IDP; pg=ip->pg;
-    if (! ifarg(1)) {printf("Return initvspks(ivspks,vspks,wvspks)\n"); return 0.;}
+    if (! ifarg(1)) {printf("Return initvspks(indices,times,weights,syntypes)\n"); return 0.;}
     if(verbose>1) printf("initvspks: col=%d, ip=%p, pg=%p, pg->isp=%p\n",ip->col,ip,pg,pg->isp);
     if (pg->isp!=NULL) clrvspks();
     ip=IDP; pg=ip->pg; err=0;
@@ -2615,13 +2947,14 @@ PROCEDURE initvspks () {
   ENDVERBATIM
 }
 
-:** shock() reads random spike times from save db as initvspks() but just sends a single shock
+:** shock() reads random spike times from same db as initvspks() but just sends a single shock
 : to each listed cell
 : this is a global procedure that calls multiple cells
 PROCEDURE shock () {
   VERBATIM 
   {int max, i,err;
     double last, lstt, *isp, *vsp, *wsp;
+    printf("WARNING: This routine appears to be defunct -- please check code in intf6.mod\n");
     if (! ifarg(1)) {printf("Return shock(ivspks,vspks,wvspks)\n"); return 0.;}
     ip=IDP; pg=ip->pg; err=0;
     i = vector_arg_px(1, &isp); // could just set up the pointers once
@@ -3069,7 +3402,7 @@ PROCEDURE wrecord (te) {
           wwo[wrp][k+j] += scale*_t_Psk[j+max]; // direct copy from the Psk table
         }
       }
-    } else if (twg>=t) { return;
+    } else if (twg>=t) { return 0;
     } else {
       for (ti=twg,k=(int)floor((twg-rebeg)/vdt+0.5);ti<=t && k<wwsz;ti+=vdt,k++) { 
         valps(ti,twg);  // valps() for pop spike calculation
@@ -3247,11 +3580,11 @@ FUNCTION flag () {
   ip=IDP; pg=ip->pg;
   if (FLAG==OK) { // callback -- DO NOT SET FROM HOC
     FLAG=0.;
-    if (stoprun) {slowset=0; return;}
+    if (stoprun) {slowset=0; return 0.0;}
     if (IDP->dbx==-1)printf("slowset fi:%d ix:%d ss:%g delt:%g t:%g\n",fi,ix,slowset,delt,t);
     if (t>slowset || ix>=pg->cesz) {  // done
       printf("Slow-setting of flag %d finished at %g: (%d,%g,%g)\n",fi,t,ix,delt,slowset); 
-      slowset=0.; return;
+      slowset=0.; return 0.0;
     }
     if (ix<pg->cesz) {
       lop(pg->ce,ix);
@@ -3263,12 +3596,12 @@ FUNCTION flag () {
       net_send((void**)0x0, wts,tpnt,delt,OK);
       #endif
     }
-    return;
+    return 0.0;
   }  
   if (slowset>0 && ifarg(3)) {
     printf("INTF6 flag() slowset ERR; attempted set during slowset: fi:%d ix:%d ss:%g delt:%g t:%g",\
            fi,ix,slowset,delt,t); 
-    return;
+    return 0.0;
   }
   ip = IDP; setfl=ifarg(3); 
   if (ifarg(4)) { slowset=*getarg(4); delt=slowset/pg->cesz; slowset+=t; } 
@@ -3440,7 +3773,7 @@ FUNCTION dopelearn () {
   Point_process *pnnt;
   int i , iCell, pot;
   double tmp,maxw,inc,d,tau,pdopet;
-  if(seadsetting!=3.) return; // seadsetting==3 for DOPE, must be set before network setup
+  if(seadsetting!=3.) return 0.0; // seadsetting==3 for DOPE, must be set before network setup
   pot = (int) *getarg(1); // 
   ip=IDP; pg=ip->pg;
   for(iCell=0;iCell<pg->cesz;iCell++){
@@ -3493,65 +3826,8 @@ FUNCTION dopelearn () {
   ENDVERBATIM
 }
 
-
-PROCEDURE setscaling() {
-  VERBATIM
-  // Turn compensatory synaptic scaling on for E cells
-  // GLOBAL procedure which simply sets a flag to which all cells subscribe
-  if (*getarg(1) == 1) {
-    printf("Enabling compensatory synaptic scaling for E cells only\n");
-    scaling = 1; // Set global scaling flag = true
-  } else {
-    printf("Turning off compensatory synaptic scaling for E cells\n");
-    scaling = 0; // Set global scaling flag = false
-  }
-  ENDVERBATIM
-}
-
-
-PROCEDURE setIscaling() {
-  VERBATIM
-  // Allow compensatory synaptic scaling for all (E and I) cells
-  // Global procedure which sets a flag to which all cells subscribe
-  if (*getarg(1) == 1) {
-    printf("Enabling compensatory synaptic scaling for E and I cells\n");
-    scaleinhib = 1; // Set global scaling flag = true
-  } else {
-    printf("Turning off compensatory synaptic scaling for E and I cells\n");
-    scaleinhib = 0; // Set global scaling flag = false
-  }
-  ENDVERBATIM
-}
-
-
-PROCEDURE setgrowthfactorscaling() {
-  VERBATIM
-  // Allow global growth factors (BDNF and TNF-a) to affect scaling.
-  // Global procedure which sets a flag to which all cells subscribe
-  if (*getarg(1) == 1) {
-    printf("Enabling additional global growth factor scaling\n");
-    growthfactorscaling = 1; // Set global growth factor scaling flag = true
-
-    // Sum activity sensors of all cells to obtain network goal activity rate
-    ip=IDP; pg=ip->pg;
-    int i;
-    network_goal_activity = 0;
-    for(i=0; i < pg->cesz; i++){
-      lop(pg->ce,i); // Set the qp pointer to cell i
-      network_goal_activity += qp->activity; // Add cell i's actiivty to the network activity level
-    }
-
-    printf("Network global goal activity: %f Hz\n", network_goal_activity*1000);
-    
-  } else {
-    printf("Turning off additional global growth factor scaling\n");
-    growthfactorscaling = 0; // Set global growth factor scaling flag = false
-  }
-  ENDVERBATIM
-}
-
-
-PROCEDURE setdeletion() {
+: intf.setdeletion - see comments below - used by homeostatic synaptic scaling
+PROCEDURE setdeletion () {
   VERBATIM
   // Allow neurons to spontaneously die in proportion to their scaling factor (modified by
   // a rate constant which can be supplied as an argument).
@@ -3560,7 +3836,6 @@ PROCEDURE setdeletion() {
   //
   // ARGUMENT: dynamic deletion rate constant (<=0 turns off dynamic deletion, >0 turns it on and
   // sets the rate constant).
-
   double x = *getarg(1);
   if (x <= 0) {
     dynamicdel = 0; // Turn off dynamic deletion
@@ -3572,83 +3847,81 @@ PROCEDURE setdeletion() {
   ENDVERBATIM
 }
 
-
-PROCEDURE setactivitygamma() {
-  VERBATIM
-  // Alter the scaling integral controller weight (gamma) for all cells
-  activitygamma = *getarg(1);
-  printf("Set gamma = %e\n", activitygamma);
-  ENDVERBATIM
-}
-
-
-PROCEDURE setactivitybeta() {
-  VERBATIM
-  // Alter the scaling weight (beta) for all cells
-  activitybeta = *getarg(1);
-  printf("Set beta = %e\n", activitybeta);
-  ENDVERBATIM
-}
-
-
-PROCEDURE setactivitytau() {
-  VERBATIM
-  // Alter the activity sensor update constant (tau) for all cells
-  activitytau = *getarg(1);
-  printf("Set tau = %e\n", activitytau);
-  ENDVERBATIM
-}
-
-
 VERBATIM
-void dynamicdelete(double time) {
+void dynamicdelete (double time) {
   // Allow this cell to die, with probability proportional to excitation and rate constant
   // Integrate over time since last call.
   
   // mcell_ran4 appears to take following args:
   // seed, pointer to RNG output store, num. random values to generate, range of random var (?)
   mcell_ran4(&sead, dscr, 1, 1.0); // Generate random value
-  double rnd = dscr[0]; // Get the random value generated by the mcell_ran4 call
+  double p = dscr[0]; // Get the random value generated by the mcell_ran4 call
 
-  double error = (ip->activity - ip->goal_activity) / ip->goal_activity; // Find error as a proportion of the goal activity (so that cells with a naturally high activity are allowed proportionally more over-activity for the same risk of excitotoxicity).
+  double difference = ip->activity / ip->goal_activity; // Find magnitude of difference between activity and goal activity
 
-  // Enter 'apoptosis' if cell is over 1.5x target rate
-  if (error > 1.5) {
+  // Check if p < (difference-2)^2 * delspeed, normalised by time since last check, t - t'.
+  //
+  // This means that when difference = 2, chance of deletion is zero
+  // (i.e. all cells are allowed to at least double their baseline firing rates without
+  // risking excitotoxicity).
+  // When difference = 3, chance of deletion per second is delspeed.
+  // When difference = 4, chance of deletion per second is exponentially higher, etc.
+  double x = difference - 2.0;
+  if (x < 0) {
+    x = 0; // Prevent scalefactors which are <1 from having a positive x^2
+  }
+  double threshold =  x * x * delspeed * ((time - ip->lastupdate) / 1000.0);
 
-    // Calculate p_death based on amount of time cell is over-active,
-    // and multiplied by scaling factor to indicate highest-scaling cells being more susceptible
-    double p_death = delspeed * (time - ip->lastupdate / 1000.0) * ip->scalefactor;
-  
-    // Normalise error by time since last check, t - t'.
-    //error = error * ((time - ip->lastupdate) / 1000.0);
+  if (p < threshold) {
+    printf("p = %e, threshold = %e from x^2 * delspeed * timegap:\nx = %e, x^2 = %e, delspeed = %e, x^2*delspeed = %e, timegap (s) = %e\n", p, threshold, x, x*x, delspeed, x*x*delspeed, (time-ip->lastupdate)/1000.0);
 
-    // Then multiply by deletion rate constant, and obtain probability of deletion
-    //double p_death = delspeed * error;
-  
-    if (rnd < p_death) {
-      printf("rnd = %e, p_death = %e (error * delspeed * timegap)\nerror = %e, delspeed = %e, timegap (s) = %e\n", rnd, p_death, error, delspeed, (time-ip->lastupdate)/1000.0);
-
-      ip->dead = 1; // Kill cell
-      printf("Cell %d has just died (scalefactor = %f)\n\n", ip->id, ip->scalefactor);
-    }
+    ip->dead = 1; // Kill cell
+    printf("Cell %d has just died (scalefactor = %f)\n\n", ip->id, ip->scalefactor);
   }
 }
 ENDVERBATIM
 
+VERBATIM
+double get_avg_activity () {
+  //Start by implementing retrospectively (i.e. assume network has been trained according to
+  //pre-defined activity levels, but manually set targets retrospectively to these values by observation)
+  // - with more time, implement Turrigiano (2008)'s "Factor+ vs Factor-" which balances firing rates
+  
+  // We could simply set goal_activity to be the current average activity value using
+  //return ip->activity;
+  // at an arbitrary time (e.g. when we turn on scaling). But as 'current' activity fluctuates, we don't
+  // want to be stuck maintaining an unrealistic average firing rate, in the case that the 'current'
+  // activity value was unusually high at the time of setting the goal.
+  // It would be better to record an average of the neuron's activity so far, and use that as the goal.
+  return ip->spkcnt / t;
+}
+ENDVERBATIM
 
 VERBATIM 
-void raise_activity_sensor(double time, double weight) {
+void raise_activity_sensor (double time) {
   // Update the cell's activity sensor value, assuming this function has been called at the same
-  // time as an incoming spike
+  // time as a spike at time t
   // REQUIRES: time of current spike in ms
   // ENSURES: returns activity value in MHz (due to ms timing)
   
-  // Raise the activity by (-a + weight) / tau
-  ip->activity = ip->activity + (-ip->activity + weight) / activitytau;
+  // Raise the activity by (-a + 1) / tau
+  ip->activity = ip->activity + (-ip->activity + 1.0) / activitytau;
+
+  // Update lastupdate time for next decay operation
+  // -- probably shouldn't set this here, as it's also set in the NET_RECEIVE block on every
+  // incoming event, and multiple updates of ip->lastupdate in different places will just lead
+  // to confusion
+  //ip->lastupdate = time;
+  
+  // DEBUG: (pick a random cell ID)
+  //if (ip->id == 9 || ip->id == 10) {
+  //  printf("spike from cell %d (inhib = %d) at time %f --> activity sensor = %f, target activity = %f, average activity = %f, scale = %f\n", ip->id, ip->inhib, time, ip->activity, ip->goal_activity, get_avg_activity(), ip->scalefactor);
+  //}
 }
 ENDVERBATIM
+
 VERBATIM
-void decay_activity_sensor(double time) {
+void decay_activity_sensor (double time) {
   // Decay the cell's activity sensor value according to the time since last decay update
   // In van Rossum et al. (2000), this is called every discrete timestep t
   // But this procedure is only called on NET_RECEIVE events, so we need to decay
@@ -3659,36 +3932,12 @@ void decay_activity_sensor(double time) {
 }
 ENDVERBATIM
 
-
-VERBATIM 
-void raise_firingrate_sensor(double time) {
-  // Update the cell's firing rate value, assuming this function has been called at the same
-  // time as an outgoing spike at time t
-  // Raise the activity by (-a + 1) / tau
-  ip->firingrate = ip->firingrate + (-ip->firingrate + 1.0) / activitytau;
-}
-ENDVERBATIM
 VERBATIM
-void decay_firingrate_sensor(double time) {
-  // a_t = a_t0 * e(-(1/tau * t-t0))
-  ip->firingrate = ip->firingrate * exp(-activityoneovertau * (time - ip->lastupdate));
-}
-ENDVERBATIM
-
-
-
-VERBATIM
-void update_scale_factor(double time) {
+void update_scale_factor (double time) {
   // Implements weight scaling according to van Rossum et al. (2000)
 
-  double err = 0;
-  if (growthfactorscaling) {
-    // Get difference betwteen (goal * global growth factor) and current activity
-    err = (ip->goal_activity * growth_factor_scale_amount) - ip->activity;
-  } else {
-    // Get difference between goal and current activity
-    err = ip->goal_activity - ip->activity;
-  }
+  // Get difference between goal and current activity
+  double err = ip->goal_activity - ip->activity;
 
   // Bound error to max_err value in the case that the activity sensor saturates during epileptic activity
   // This should prevent the integral from becoming excessively large over a relatively short time,
@@ -3700,23 +3949,21 @@ void update_scale_factor(double time) {
     //err = -ip->max_err;
   //}
 
-  // Scale error by time since last update
-  err *= time - ip->lastupdate;
-  // e.g. If last update was 1ms ago, then the time correction = 1
-  // If last update was 0.1ms ago correction = 0.1, so the accumulated error will be much smaller
-  // If it's been a long time since the last update, the error will be correspondingly much larger
-  
-  // Calculate integral error term between sensor and target activity for next time (t')
-  ip->activity_integral_err += err;
-
   // Set scalefactor
-  ip->scalefactor += ((activitybeta * ip->scalefactor * err) + (activitygamma * ip->scalefactor * ip->activity_integral_err));
+  ip->scalefactor += (activitybeta * ip->scalefactor * err + activitygamma * ip->scalefactor * ip->activity_integral_err);
 
   // Bound scalefactor to max_scale to prevent Inf values
   if (ip->scalefactor > ip->max_scale) {
     ip->scalefactor = ip->max_scale;
   }
 
+  // Calculate integral error term between sensor and target activity for next time (t')
+  double timecorrection = time - ip->lastupdate;
+  // e.g. If last update was 1ms ago, then the time correction = 1
+  // If last update was 0.1ms ago correction = 0.1, so the accumulated error will be much smaller
+  // If it's been a long time since the last update, the error will be correspondingly much larger
+
+  ip->activity_integral_err += (err * timecorrection);
   // DEBUG: (pick a random cell ID)
   //if (ip->id == 9 || ip->id == 10) {
   //  printf("cell %d err = %f, time-corrected err = %f, integral_err = %f\n", ip->id, err, (err * timecorrection), ip->activity_integral_err);
@@ -3724,100 +3971,36 @@ void update_scale_factor(double time) {
 }
 ENDVERBATIM
 
-
-VERBATIM
-double calculate_growth_factor_scale_amount() {
-  // Scaling can additionally be modified by global growth factors (BDNF and TNF-a)
-  // BDNF is released by E cells during E cell activity, and acts to inhibit E activity
-  // TNF-a is released by glial cells in the ABSENCE of E activity, and acts to raise E activity
-  //
-  // But we will simplify things somewhat by modelling deviation of total network activity from
-  // the starting value, and multiplying individual cells' goal activities by this amount during
-  // the calculation of each cell's scale factor.
-  //
-  // Deletion will still progress based on the difference between a cell's activity and its
-  // ORIGINAL target activity.
-  
-  // Find global activity value by summing activity sensors of all E cells
-  ip=IDP; pg=ip->pg;
-  int i;
-  double network_activity = 0;
-  for(i=0; i < pg->cesz; i++){
-    lop(pg->ce,i); // Set the qp pointer to cell i
-    network_activity += qp->activity; // Add cell i's activity to the network activity level
-  }
-
-  // Find difference between global activity and network_goal_activity
-  return network_goal_activity / network_activity;
-}
-ENDVERBATIM
-
-
-FUNCTION get_scale_factor() {
+: intf.scalefactor - optional arg sets value
+:  used by homeostatic synaptic scaling
+FUNCTION scalefactor () {
   VERBATIM
-  ip = IDP;
-  // Return this cell's scale factor
-  _lget_scale_factor = ip->scalefactor;
+  if (ifarg(1)) IDP->scalefactor = *getarg(1);
+  return IDP->scalefactor; // Return this cell's scale factor
   ENDVERBATIM
 }
 
-
-FUNCTION update_global_scale_factor() {
+: intf.activity - optional arg sets value
+:  used by homeostatic synaptic scaling
+FUNCTION activity () {
   VERBATIM
-  // This function should be called periodically (e.g. from a hoc file) to update growth_factor_scale_amount.
-  growth_factor_scale_amount = calculate_growth_factor_scale_amount(); // Update the global growth factor scaling weight
-  _lupdate_global_scale_factor = growth_factor_scale_amount; // Also return the value so we can examine it
+  if (ifarg(1)) IDP->activity = *getarg(1);
+  return IDP->activity; // Return this cell's activity sensor value
   ENDVERBATIM
 }
 
-
-FUNCTION get_firing_rate() {
+: intf.goalactivity - optional arg sets value 
+:  used by homeostatic synaptic scaling - target firing rate
+FUNCTION goalactivity () {
   VERBATIM
-  ip = IDP;
-  // Return this cell's firing rate
-  _lget_firing_rate = ip->firingrate;
+  if (ifarg(1)) IDP->goal_activity = *getarg(1);
+  return IDP->goal_activity;   // Return this cell's target activity value
   ENDVERBATIM
 }
 
-FUNCTION get_activity() {
+: intf.isdead - is the cell dead?
+FUNCTION isdead() {
   VERBATIM
-  ip = IDP;
-  // Return this cell's activity sensor value
-  _lget_activity = ip->activity;
-  ENDVERBATIM
-}
-
-FUNCTION get_target_act() {
-  VERBATIM
-  ip = IDP;
-  // Return this cell's target activity value
-  _lget_target_act = ip->goal_activity;
-  ENDVERBATIM
-}
-
-
-FUNCTION get_id() {
-  VERBATIM
-  ip = IDP;
-  // Return this cell's id
-  _lget_id = ip->gid;
-  ENDVERBATIM
-}
-
-
-FUNCTION get_type() {
-  VERBATIM
-  ip = IDP;
-  // Return this cell's type
-  _lget_type = ip->type;
-  ENDVERBATIM
-}
-
-
-FUNCTION get_dead() {
-  VERBATIM
-  ip = IDP;
-  // Return this cell's 'dead' flag
-  _lget_dead = ip->dead;
+  return IDP->dead; // Return this cell's 'dead' flag
   ENDVERBATIM
 }

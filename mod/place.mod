@@ -1328,13 +1328,13 @@ si4	GetEEGChannelList(ui4 *BPFEEGChannels, si1 *SectionStart){
 	dp = (ui1 *)SectionStart;
         if(!FindKeyWord((si1 *)dp, LIST_OF_EEG_CHANNELS, KeyWordString, Encoding)){
                 fprintf(MyStdErr,"\nCan't find keyWord (%s).\n", LIST_OF_EEG_CHANNELS);
-			return;
+			return -1;
         }
         Type = GetType(KeyWordString);
         switch(Type){
         case -1:
                 fprintf(MyStdErr,"KeyWord.integer format not respected in: %s\nWrong File Format.\n", KeyWordString);
-                return; 
+                return -1; 
 
         case 0: // ASCII encoded
                 NumberOfParameters = GetASCIIEncoding(Encoding, &Parameters);
