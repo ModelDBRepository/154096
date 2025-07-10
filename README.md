@@ -109,6 +109,8 @@ batchscripts/<script>
          |  alz.hoc
 ```
 
+## Changelog
+
 20160921 This version incorporates fixes that allows the model to run on mac OS X.
 
 20250709 Converted README to Markdown.
