@@ -111,6 +111,4 @@ batchscripts/<script>
 
 20160921 This version incorporates fixes that allows the model to run on mac OS X.
 
----
-
-2025-07-09: Converted README to Markdown.
+20250709 Converted README to Markdown.
